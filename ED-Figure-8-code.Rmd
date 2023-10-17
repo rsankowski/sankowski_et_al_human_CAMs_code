@@ -1,0 +1,194 @@
+---
+title: "Figure-extended-data-Figure-8-code"
+output: html_notebook
+---
+
+```{r Load packages, warning=FALSE, message=FALSE}
+library(UCell)
+library(ggpubr)
+library(Seurat)
+library(SeuratDisk)
+library(tidyverse)
+library(assertthat)
+library(cowplot)
+library(tidyquant)
+library(viridis)
+library(EnhancedVolcano)
+library(MOFA2)
+library(HDF5Array)
+library(ComplexHeatmap)
+library(circlize)
+library(clusterProfiler)
+library(SPATA2)
+library(NICHES)
+library(tidyquant)
+source(file.path("R","functions.R"))
+```
+
+### ED Figure 8 a-b
+```{r  Figure ED_F8a-b, warning=FALSE,message=FALSE}
+load(file.path("data","multimodal_harmony_integrated_gb.RData"))
+
+all <- refquery_hm #LoadH5Seurat(file.path("data","multimodal_harmony_integrated_gb.H5Seurat"))
+rm(refquery_hm)
+
+## cell cycle scoring
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Create our Seurat object and complete the initalization steps
+all <- CellCycleScoring(all, s.features = s.genes, g2m.features = g2m.genes)
+cc_scores <- ScoreSignatures_UCell(all[["RNA"]]@counts, features=list(s.features = s.genes, g2m.features = g2m.genes))
+all <- AddMetaData(all, as.data.frame(cc_scores))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+levels(all) <- rev(order_clusters)[c(12,14,13,15:30,11:1)]
+
+## adjust cell types
+celltype_cor <- case_when(
+  all$seurat_clusters %in% c("19","29") ~ "Neuroectodermal",
+  all$seurat_clusters %in% c("17") ~ "CAMs",
+  all$seurat_clusters %in% c("3","7","11","14","16","0","12","1","5") ~ "MG",
+  all$seurat_clusters %in% c("15","25","4") & all$diagnosis == "GB" ~ "moTAMs",
+  all$seurat_clusters %in% c("2") & all$diagnosis == "GB" ~ "mgTAMs",
+  all$seurat_clusters %in% c("8") ~ "Class. Mono",
+  all$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all$predicted.celltype == "CD16 Mono" & all$seurat_clusters == ("23") ~ "Non-Class. Mono",
+  T ~ all$predicted.celltype
+)
+names(celltype_cor) <- colnames(all)
+all$celltype_cor <- celltype_cor
+
+signatures <- c("macrophages_UCell","microglia_UCell","monocytes_UCell","cDC2_UCell","s.features_UCell","g2m.features_UCell")
+walk(signatures, function(x) {
+  plt <- FeaturePlot(all,x) +
+    scale_color_distiller(palette = "Reds", direction = 1) +
+    theme_void()
+  print(plt)
+})
+```
+
+```{r source data ED8Fa_b, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 4b
+write.csv(data.frame("UMAP_1"=all@reductions$umap@cell.embeddings[,1],
+                     "UMAP_2"=all@reductions$umap@cell.embeddings[,2],
+                     all[[]][,signatures]
+                     ),
+          file.path("data","source_data","panel_ED_F8ab.csv"))
+```
+
+
+### Figure ED 8c 
+```{r ED Figure 8a_b, warning=FALSE,message=FALSE}
+
+reference <- all[,all$diagnosis=="GB" &all$compartment == "CTX" ] %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures(nfeatures=10000) %>% 
+  ScaleData() %>% 
+  RunPCA()
+reference <- reference %>% 
+  RunUMAP(reduction = "harmony", dims = 1:30, return.model = T)
+
+
+x <- "Citeseq_human_GBM"
+.obj <- Read10X(file.path("data","antunes_et_al",x,"filtered_feature_bc_matrix"))
+.obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`, min.cells = 1, min.features = 500) %>% 
+  AddMetaData(x, "sample") %>% 
+  AddMetaData("antunes_et_al", "experiment") %>% 
+  AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>%
+  AddMetaData(ifelse(grepl("Newly",x), "ND", "R"),"stage") %>% 
+  AddMetaData(read.csv(file.path("data","antunes_et_al",x,"annot_Human_TAM_DC_Mono_citeSeq.csv"), row.names="cell")) %>% 
+  subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+
+.obj_seurat <- .obj_seurat %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures(nfeatures=10000) %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+## map the antunes data to gb reference
+anchors <- FindTransferAnchors(
+  reference = reference,
+  query = .obj_seurat,
+  reference.reduction = "pca", 
+  dims = 1:50)
+
+antunes <- TransferData(
+  anchorset = anchors, 
+  query = .obj_seurat,
+  reference = reference, 
+  refdata = list(
+    celltype = "celltype_cor", 
+    cluster = "seurat_clusters", 
+    predicted_ADT = "ADT")
+)
+
+## remove tumor cells
+antunes <- antunes[,!is.na(antunes$cluster)]
+
+antunes[[]] %>% 
+  mosaicGG2(X="predicted.cluster", "cluster")
+
+antunes[[]] %>% 
+  na.omit() %>% 
+  hyper_test_n(var1="predicted.cluster", var2 = "cluster") 
+
+```
+
+```{r source data ED8Fc, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 4b
+df <- antunes[[]][,c("predicted.cluster", "cluster")]
+colnames(df) <- c("predicted.cluster_this_study", "cluster_original_study")                
+          
+df %>% write.csv(file.path("data","source_data","panel_ED_F8c.csv"))
+```
+
+### Figure ED 8d
+```{r ED Figure 8d, warning=FALSE,message=FALSE}
+
+## find cluster marker genes
+if (!file.exists(file.path("data","cluster_markers_gb_10x.RData"))) {
+  all_markers <- FindAllMarkers(all)
+  save(all_markers, file = file.path("data","cluster_markers_gb_10x.RData"))
+} else {
+  load(file.path("data","cluster_markers_gb_10x.RData"))
+}
+
+## plot top 20 markers
+top20 <- all_markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC) 
+
+write.csv2(top20, file.path("data","gb_top20_genes.csv"))
+
+heat <- DoHeatmap(all,features = top20$gene, group.colors = c(colors_many, colors,unname(palette_green()))[-c(14,21,28)])
+heat + scale_fill_viridis(option = "A")
+
+```
+
+```{r source data EDF8d, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1d
+mat <- all[["RNA"]]@scale.data[top20$gene[top20$gene %in% rownames(all[["RNA"]]@scale.data)],] 
+colnames(mat) <- all$seurat_clusters
+mat2 <- Matrix(mat, sparse = T)
+save(mat2, file = file.path("data","source_data","panel_EDF8d.RData"))
+write.csv(mat, file.path("data","source_data","panel_EDF8d.csv"))
+```
+
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

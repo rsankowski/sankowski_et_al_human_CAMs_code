@@ -1,0 +1,185 @@
+---
+title: "Figure-extended-data-Figure-7-code"
+output: html_notebook
+---
+
+```{r Load packages, warning=FALSE, message=FALSE}
+library(readxl)
+library(ggpubr)
+library(tidyverse)
+library(tidyquant)
+library(EnhancedVolcano)
+library(Seurat)
+library(SeuratDisk)
+library(UCell)
+library(viridis)
+library(Matrix)
+
+source(file.path("R","functions.R"))
+```
+
+### Extended Data Figure 7a - top
+```{r Figure ED_F7b a, warning=FALSE,message=FALSE}
+
+all <- LoadH5Seurat(file.path("data","all_cells_ffpe.H5Seurat"))
+
+celltypes <- read.table(file.path("data","azimuth_ffpe","azimuth_pred.tsv"), sep="\t",header = T,row.names = 1)
+
+all <- all %>% AddMetaData(celltypes)
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["SCT"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(all) <- rev(order_clusters)
+all$seurat_clusters <- factor(all$seurat_clusters, levels = levels(all))
+
+## cluster
+DimPlot(all, label = T) +
+  scale_color_tq() +
+  theme_void() +
+  NoLegend()
+```
+
+```{r source data ED F7a, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1b
+data.frame(UMAP_1=all@reductions$umap@cell.embeddings[,"UMAP_1"] ,
+            UMAP_2=all@reductions$umap@cell.embeddings[,"UMAP_2"] ,
+            cluster=all$seurat_clusters) %>% 
+  write.csv(file.path("data","source_data","panel_ED_F7a.csv"))
+```
+
+### Extended Data Figure 7a - bottom
+```{r Figure ED_F7a_bottom, warning=FALSE,message=FALSE}
+all[[]] %>% 
+  mosaicGG2("seurat_clusters", "condition", colors = c("#B1DDBF","#F3A8A8"))
+```
+### Extended Data Figure 7b
+```{r Figure ED_F7b, warning=FALSE,message=FALSE}
+all_markers <- FindAllMarkers(all)
+
+top7 <- all_markers %>% 
+  group_by(cluster) %>% 
+  filter(!grepl("MT-",gene)) %>% 
+  top_n(7, wt = avg_log2FC)
+
+heat <- DoHeatmap(all,features = top7$gene, group.colors = rep(unname(palette_light()),2))
+heat + scale_fill_viridis(option = "A")
+```
+```{r source data ED 7 b, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1d
+mat <- all[["SCT"]]@scale.data[top7$gene[top7$gene %in% rownames(all[["SCT"]]@scale.data)],] 
+colnames(mat) <- all$seurat_clusters
+mat2 <- Matrix(mat, sparse = T)
+save(mat2, file = file.path("data","source_data","panel_ED_F_7b.RData"))
+write.csv(mat, file.path("data","source_data","ED_F_7b.csv"))
+```
+
+### Extended Data Figure 7 c
+```{r Figure ED_F7c, warning=FALSE,message=FALSE}
+micr <- LoadH5Seurat(file.path("data","micr_ffpe.H5Seurat"))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= micr$seurat_clusters, row.names = rownames(micr[[]])) %>%
+  bind_cols(as.data.frame(t(micr[["SCT"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(micr) <- order_clusters
+micr$seurat_clusters <- factor(micr$seurat_clusters, levels = levels(micr))
+
+micr_markers <- FindAllMarkers(micr)
+
+## plot dotplot
+top5 <- micr_markers %>% 
+  filter(p_val_adj<.05, avg_log2FC>0) %>% 
+  group_by(cluster) %>% 
+  top_n(10, wt = avg_log2FC)
+
+heat <- DoHeatmap(micr,features = top5$gene, group.colors = unname(palette_light()))
+heat + scale_fill_viridis(option = "A")
+
+```
+```{r source data ED 7 c, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1d
+mat <- micr[["SCT"]]@scale.data[top5$gene[top5$gene %in% rownames(micr[["SCT"]]@scale.data)],] 
+colnames(mat) <- micr$seurat_clusters
+mat2 <- Matrix(mat, sparse = T)
+save(mat2, file = file.path("data","source_data","panel_ED_F_7c.RData"))
+write.csv(mat, file.path("data","source_data","ED_F_7c.csv"))
+```
+
+### Extended Data Figure 7 d
+```{r Figure ED_F7d, warning=FALSE,message=FALSE}
+df <- read_excel(file.path("data","Y_in_marker_pos_numeric.xlsx"), skip = 1, col_types = c("text","numeric","numeric","numeric","numeric","numeric"))
+
+## plot
+df2 <- df %>% 
+  pivot_longer(`Y+/Iba1+`:`Y+/P2ry12+`, values_to = "Positivity", names_to = "Protein")
+
+## p2ry12
+p2r <- df2 %>% 
+  filter(grepl("Iba1|P2r", Protein)) %>% 
+  ggplot(aes(x=Protein, y=Positivity, fill=Protein)) + 
+  geom_line(aes(group=Patient), color="darkgrey", linewidth=1) + 
+  geom_point(pch=21, size=5) +
+  expand_limits(y=c(0,90)) +
+  scale_fill_manual(values = unname(palette_light())[1:2], guide="none") +
+  theme_linedraw() +
+  theme(text = element_text(size=10), axis.text.x = element_text(angle = 45, vjust = .5, hjust = .5)) +
+  stat_compare_means(method = "t.test", paired = T, size=3, label.x.npc = "middle") +
+  labs(y="Number of double-positive cells", x=element_blank())  
+
+## tmem119
+tmem <- df2 %>% 
+  filter(grepl("Iba1|Tme", Protein)) %>% 
+  ggplot(aes(x=Protein, y=Positivity, fill=Protein)) + 
+  geom_line(aes(group=Patient), color="darkgrey", linewidth=1) + 
+  geom_point(pch=21, size=5) +
+  expand_limits(y=c(0,90)) +
+  scale_fill_manual(values = unname(palette_light())[c(1,3)], guide="none") +
+  theme_linedraw() +
+  theme(text = element_text(size=10), axis.text.x = element_text(angle = 45, vjust = .5, hjust = .5)) +
+  stat_compare_means(method = "t.test", paired = T, size=3, label.x.npc = "middle") +
+  labs(y="Number of double-positive cells", x=element_blank())  
+
+## slc2a5
+slc <- df2 %>% 
+  filter(grepl("Iba1|Glu", Protein)) %>% 
+  mutate(Protein=factor(Protein, levels=c("Y+/Iba1+","Y+/Glut5+"))) %>% 
+  ggplot(aes(x=Protein, y=Positivity, fill=Protein)) + 
+  geom_line(aes(group=Patient), color="darkgrey", linewidth=1) + 
+  geom_point(pch=21, size=5) +
+  expand_limits(y=c(0,90)) +
+  scale_fill_manual(values = unname(palette_light())[c(1,4)], guide="none") +
+  theme_linedraw() +
+  theme(text = element_text(size=10), axis.text.x = element_text(angle = 45, vjust = .5, hjust = .5)) +
+  stat_compare_means(method = "t.test", paired = T, size=3, label.x.npc = "middle") +
+  labs(y="Number of double-positive cells", x=element_blank())  
+
+p2r + slc + tmem
+
+```
+
+```{r source data ED 7 d, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1d
+df2 %>% 
+write.csv(file.path("data","source_data","ED_F_7d.csv"))
+```
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de
+

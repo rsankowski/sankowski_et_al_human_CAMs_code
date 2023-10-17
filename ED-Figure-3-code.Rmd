@@ -1,0 +1,328 @@
+---
+title: "Figure-extended-data-Figure-4-code"
+output: html_notebook
+---
+
+
+### Load packages
+```{r load packages, warning=FALSE, message=FALSE}
+library(Seurat)
+library(SeuratDisk)
+library(SeuratData)
+library(tidyverse)
+library(assertthat)
+library(cowplot)
+library(tidyquant)
+library(viridis)
+library(MOFA2)
+library(HDF5Array)
+library(ComplexHeatmap)
+library(circlize)
+library(MOFAdata)
+library(clusterProfiler)
+library(biomaRt)
+
+## load functions
+source(file.path("R","functions.R"))
+```
+
+
+### Preprocess for ED Figure 3 a
+```{r load objects, warning=FALSE, message=FALSE}
+load(file.path("data","multimodal_harmony_integrated_controls.RData"))
+all <- refquery_merged
+rm(refquery_merged)
+source(file.path("R","functions.R"))
+
+## cell cycle scoring
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Create our Seurat object and complete the initalization steps
+all <- CellCycleScoring(all, s.features = s.genes, g2m.features = g2m.genes)
+cc_scores <- ScoreSignatures_UCell(all[["RNA"]]@counts, features=list(s.features = s.genes, g2m.features = g2m.genes))
+all <- AddMetaData(all, as.data.frame(cc_scores))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(all) <- rev(order_clusters)[c(11:15,10:1,31:33,16:30,34:35)] 
+all$seurat_clusters <- factor(all$seurat_clusters, levels = levels(all))
+
+## adjust cell types
+celltype_cor <- case_when(
+  all$seurat_clusters == "24" ~ "Neuroectodermal cells",
+  all$seurat_clusters == "18" & all$predicted.celltype =="Platelet" ~ "cDC2",
+  all$seurat_clusters %in% c("19","26") ~ "CAMs",
+  all$seurat_clusters %in% c("22") & all$compartment == "CP" ~ "Kolmer cells",
+  all$seurat_clusters %in% c("0","1","4","6","13","16","22","30") ~ "MG",
+  all$seurat_clusters %in% c("9") ~ "Class. Mono",
+  all$seurat_clusters %in% c("27") & all$predicted.celltype %in% c("HSPC") ~ "NK Proliferating",
+  all$seurat_clusters %in% c("28") & all$predicted.celltype %in% c("HSPC") ~ "pDC",
+  all$seurat_clusters %in% c("20") ~ "moMF",
+  all$seurat_clusters %in% c("15","7","2") ~ "Class. Mono",
+  all$seurat_clusters %in% c("31","23") ~ "Non-Class. Mono",
+  all$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all$predicted.celltype == "CD16 Mono" ~ "Non-Class. Mono",
+  T ~ all$predicted.celltype
+)
+names(celltype_cor) <- colnames(all)
+all$celltype_cor <- celltype_cor
+
+## subset for tissue resident myeloid cells
+cams_mg <- subset(all, subset=celltype_cor %in% c("CAMs","MG","moMF","Kolmer cells"))
+
+## create the mofa object
+if (!file.exists(file.path("data","mofa_model_ctrl_myeloid_cells.h5"))) {
+  ## create MOFA object
+  #DefaultAssay(cams_mg) <- "RNA"
+  cams_mg <- cams_mg %>% NormalizeData() %>% FindVariableFeatures(nfeatures = 10000) %>% ScaleData() 
+    
+  MOFAobject_all <- create_mofa(cams_mg, groups = "compartment", features = VariableFeatures(cams_mg), assay="RNA", extract_metadata = T)
+  
+  ## plot data overview
+  plot_data_overview(MOFAobject_all)
+  
+  ## Default data options
+  data_opts <- get_default_data_options(MOFAobject_all)
+  
+  ## Default model options
+  model_opts <- get_default_model_options(MOFAobject_all)
+  
+  ## Training options
+  train_opts <- get_default_training_options(MOFAobject_all)
+  train_opts$convergence_mode <- "fast"
+  train_opts$seed <- 42
+  model_opts$num_factors <- 10
+  
+  #prepare mofa object
+  MOFAobject_all <- prepare_mofa(
+    object = MOFAobject_all,
+    data_options = data_opts,
+    model_options = model_opts,
+    training_options = train_opts
+  )
+  
+  ## generate a hdf5 file for the output
+  rhdf5::h5createFile(file.path("data","mofa_model_ctrl_myeloid_cells.h5"))
+  
+  ## train model
+  MOFAobject_all <- run_mofa(MOFAobject_all, outfile = file.path("data","mofa_model_ctrl_myeloid_cells.h5"), use_basilisk = T)
+} else {
+  MOFAobject_all <- load_model(file.path("data","mofa_model_ctrl_myeloid_cells.h5"))
+}
+```
+
+### Extended Data Figure 3a
+```{r ED F3a, warning=FALSE, message=FALSE}
+plt <- plot_variance_explained(MOFAobject_all, x="view", y="factor") +
+  geom_text(aes(label=round(value,2))) +
+  coord_fixed()
+plt
+```
+
+```{r source data F2b, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(plt$data, file.path("data","source_data","panel_EDF3a.csv"))
+```
+
+```{r ED F3b, warning=FALSE, message=FALSE}
+## cluster profiler
+mofa_weights2 <- get_weights(MOFAobject_all, views = "RNA", factors = 1:7, 
+                            as.data.frame = TRUE) %>% 
+  group_by(factor) %>% 
+  top_n(100, wt=value)
+  #filter(value>.1)
+
+## convert gene names
+genes <- bitr(unique(mofa_weights2$feature), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = 'org.Hs.eg.db')
+colnames(genes)[1] <- "feature"
+
+## comparison between clusters
+mofa_weights2 <- mofa_weights2 %>% 
+  left_join(genes[!duplicated(genes$feature),]) %>% 
+  na.omit()
+
+## export mofa_weight2
+write.csv(mofa_weights2, file.path("data","mofa_weights2_>.1_cams_mg.csv"))
+
+diff_go_bp <- compareCluster(ENTREZID ~ factor,
+                             data=mofa_weights2, 
+                             fun = enrichGO,
+                             OrgDb = 'org.Hs.eg.db',
+                             ont = "BP")
+
+clusterProfiler::dotplot(diff_go_bp)
+```
+
+```{r source data F3b, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(mofa_weights2, file.path("data","source_data","panel_EDF3b.csv"))
+```
+
+```{r ED F3c, warning=FALSE, message=FALSE}
+load(file.path("data","multimodal_harmony_integrated_controls.RData"))
+all <- refquery_merged
+rm(refquery_merged)
+source(file.path("R","functions.R"))
+
+
+## cell cycle scoring
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Create our Seurat object and complete the initalization steps
+all <- CellCycleScoring(all, s.features = s.genes, g2m.features = g2m.genes)
+cc_scores <- ScoreSignatures_UCell(all[["RNA"]]@counts, features=list(s.features = s.genes, g2m.features = g2m.genes))
+all <- AddMetaData(all, as.data.frame(cc_scores))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(all) <- rev(order_clusters)[c(11:15,10:1,31:33,16:30,34:35)] 
+all$seurat_clusters <- factor(all$seurat_clusters, levels = levels(all))
+
+## adjust cell types
+celltype_cor <- case_when(
+  all$seurat_clusters == "24" ~ "Neuroectodermal cells",
+  all$seurat_clusters == "18" & all$predicted.celltype =="Platelet" ~ "cDC2",
+  all$seurat_clusters %in% c("19","26") ~ "CAMs",
+  all$seurat_clusters %in% c("22") & all$compartment == "CP" ~ "Kolmer cells",
+  all$seurat_clusters %in% c("0","1","4","6","13","16","22","30") ~ "MG",
+  all$seurat_clusters %in% c("9") ~ "Class. Mono",
+  all$seurat_clusters %in% c("27") & all$predicted.celltype %in% c("HSPC") ~ "NK Proliferating",
+  all$seurat_clusters %in% c("28") & all$predicted.celltype %in% c("HSPC") ~ "pDC",
+  all$seurat_clusters %in% c("15","20","7","2") ~ "Class. Mono",
+  all$seurat_clusters %in% c("31","23") ~ "Non-Class. Mono",
+  all$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all$predicted.celltype == "CD16 Mono" ~ "Non-Class. Mono",
+  T ~ all$predicted.celltype
+)
+names(celltype_cor) <- colnames(all)
+all$celltype_cor <- celltype_cor
+
+## human comparison cams vs mg
+if (!file.exists(file.path("data", "all_cams_mg_human.RData"))) {
+  Idents(all) <- all$celltype_cor
+  all_cams_mg_human <- FindMarkers(all, 
+                                    ident.1 = "CAMs",
+                                    ident.2 = "MG",
+                                    min.pct = 0,
+                                    logfc.threshold = 0)  %>% 
+    rownames_to_column("gene")
+  save(all_cams_mg_human,file = file.path("data",  "all_cams_mg_human.RData"))
+  write_csv(all_cams_mg_human,file = file.path("data",  "all_cams_mg_human.csv"))
+} else {
+  load(file.path("data",  "all_cams_mg_human.RData"))
+}
+
+#mouse
+load(file.path("data","eae_mouse_data","myeloid_c1_c0_mouse_cams.RData"))
+     
+#find ortholog genes
+## issue solved with url: https://support.bioconductor.org/p/9143401/
+mart <- useEnsembl("ensembl")
+ensembl.human <- biomaRt::useMart(host="https://dec2021.archive.ensembl.org", "ENSEMBL_MART_ENSEMBL", dataset="hsapiens_gene_ensembl")
+ensembl.mouse <- biomaRt::useMart(host="https://dec2021.archive.ensembl.org", "ENSEMBL_MART_ENSEMBL", dataset="mmusculus_gene_ensembl")
+
+if (!file.exists(file.path("data",  "ortholog_genes_all_mg_all_cams.RData"))) {
+  orthologs_mouse <- getLDS(attributes = c("mgi_symbol"),
+                            filters = "mgi_symbol", values = myeloid_c1_c0_mouse[["gene"]], mart = ensembl.mouse,
+                            attributesL = c("hgnc_symbol") , martL = ensembl.human)
+  
+  orthologs_human <- getLDS(attributes = c("hgnc_symbol"),
+                            filters = "hgnc_symbol", values = all_cams_mg_human[["gene"]], mart = ensembl.human,
+                            attributesL = c("mgi_symbol") , martL = ensembl.mouse)
+  
+  orthologs <- list(orthologs_mouse,orthologs_human) %>%
+    bind_rows() %>%
+    distinct() %>%
+    mutate(fused.name = ifelse( HGNC.symbol == toupper(MGI.symbol), HGNC.symbol, paste0(HGNC.symbol, "(", MGI.symbol, ")")))
+  
+  save(orthologs, file = file.path("data",  "ortholog_genes_all_mg_all_cams.RData"))
+} else {
+  load(file.path("data",  "ortholog_genes_all_mg_all_cams.RData"))
+}
+
+orthologs_human <- all_cl19_cl1_human %>%
+  #filter(p_val_adj < .05 & abs(avg_log2FC) > .25) %>%
+  mutate(
+    sign = avg_log2FC/abs(avg_log2FC),
+    p_log10_padj = -log10(p_val_adj),
+    signed_plog_padj = sign * p_log10_padj,
+    highly_diffgene = abs(.$avg_log2FC) > 0.25
+  ) %>%
+  left_join(orthologs, by = c("gene" = "HGNC.symbol"),multiple = "all") %>%
+  na.omit()
+
+orthologs_human <- all_cams_mg_human %>%
+  #filter(p_val_adj < .05 & abs(avg_log2FC) > .25) %>%
+  mutate(
+    sign = avg_log2FC/abs(avg_log2FC),
+    p_log10_padj = -log10(p_val_adj),
+    signed_plog_padj = sign * p_log10_padj,
+    highly_diffgene = abs(.$avg_log2FC) > 0.25
+  ) %>%
+  left_join(orthologs, by = c("gene" = "HGNC.symbol"),multiple = "all") %>%
+  na.omit()
+
+orthologs_c1_c0_mouse <- myeloid_c1_c0_mouse %>%
+  #filter(p_val_adj < .05 & abs(avg_log2FC) > .25) %>%
+  mutate(#gene = toupper(gene),
+    sign = avg_log2FC/abs(avg_log2FC),
+    p_log10_padj = -log10(p_val_adj),
+    signed_plog_padj = sign * p_log10_padj,
+    highly_diffgene = abs(.$avg_log2FC) > 0.25
+  )  %>%
+  left_join(orthologs, by = c("gene" = "MGI.symbol"),multiple = "all") %>%
+  na.omit()
+
+## plot normal log2fc correlation dot plot
+all_comps3 <- orthologs_human %>%
+  inner_join(orthologs_c1_c0_mouse, by = c("gene" = "HGNC.symbol"),relationship = "many-to-many",
+             suffix = c(".human", ".mouse")) %>%
+  #filter(highly_diffgene.mouse | highly_diffgene.human,
+  #       !grepl("^RP", .$fused.name.human)) %>%
+  mutate(log2fc_colors = ifelse(avg_log2FC.human > 0 & avg_log2FC.mouse > 0, "both_up", 
+                                ifelse(avg_log2FC.human < 0 & avg_log2FC.mouse < 0, "both_down", 
+                                       ifelse(avg_log2FC.human < 0 & avg_log2FC.mouse > 0, "down_up", "up_down")))) %>%
+  distinct(gene, .keep_all = T)
+
+all_comps3 %>% 
+  ggplot(aes(x=avg_log2FC.human, y=avg_log2FC.mouse, label=fused.name.human, color=log2fc_colors)) +
+  geom_point(size=4,alpha = 0.5, pch = 19) +
+  geom_text_repel(size=3, box.padding = 0.5, fontface = "italic", max.overlaps = 25) +
+  scale_color_brewer(guide="none", palette = "Set1") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.3) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.3) +
+  theme_classic() +
+  theme(panel.grid = element_blank(),
+        text = element_text(size=20)) +
+  labs(x="Human avg. log2FC", y="Mouse avg. log2FC")
+
+
+```
+
+```{r source data ED F3c, echo=FALSE,warning=FALSE,message=FALSE}
+
+write_csv(all_comps3, file.path("data","source_data","panel_EDF3c.csv"))
+
+```
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

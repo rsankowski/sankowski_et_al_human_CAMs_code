@@ -1,0 +1,278 @@
+---
+title: "Figure-1-code"
+output: html_notebook
+---
+
+### Load packages
+```{r Load packages, warning=FALSE, message=FALSE}
+library(EnhancedVolcano)
+library(UCell)
+library(ggpubr)
+library(rstatix)
+library(Seurat)
+library(SeuratDisk)
+library(assertthat)
+library(tidyquant)
+library(tidyverse)
+library(viridis)
+library(ComplexHeatmap)
+library(Matrix)
+```
+
+### Load seurat object and adjust metadata
+```{r Adjust metadata, warning=FALSE, message=FALSE}
+load(file.path("data","multimodal_harmony_integrated_controls.RData"))
+all <- refquery_merged
+rm(refquery_merged)
+source(file.path("R","functions.R"))
+
+## export numbers
+write.csv(table(all$sample, all$compartment), file.path("data","sample_compartment_overview_10x_ctrl.csv"))
+
+## cell cycle scoring
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Create our Seurat object and complete the initalization steps
+all <- CellCycleScoring(all, s.features = s.genes, g2m.features = g2m.genes)
+cc_scores <- ScoreSignatures_UCell(all[["RNA"]]@counts, features=list(s.features = s.genes, g2m.features = g2m.genes))
+all <- AddMetaData(all, as.data.frame(cc_scores))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(all) <- rev(order_clusters)[c(11:15,10:1,31:33,16:30,34:35)] 
+all$seurat_clusters <- factor(all$seurat_clusters, levels = levels(all))
+
+## adjust cell types
+celltype_cor <- case_when(
+  all$seurat_clusters == "24" ~ "Neuroectodermal cells",
+  all$seurat_clusters == "18" & all$predicted.celltype =="Platelet" ~ "cDC2",
+  all$seurat_clusters %in% c("19","26") ~ "CAMs",
+  all$seurat_clusters %in% c("22") & all$compartment == "CP" ~ "Kolmer cells",
+  all$seurat_clusters %in% c("0","1","4","6","13","16","22","30") ~ "MG",
+  all$seurat_clusters %in% c("9") ~ "Class. Mono",
+  all$seurat_clusters %in% c("27") & all$predicted.celltype %in% c("HSPC") ~ "NK Proliferating",
+  all$seurat_clusters %in% c("28") & all$predicted.celltype %in% c("HSPC") ~ "pDC",
+  all$seurat_clusters %in% c("15","20","7","2") ~ "Class. Mono",
+  all$seurat_clusters %in% c("31","23") ~ "Non-Class. Mono",
+  all$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all$predicted.celltype == "CD16 Mono" ~ "Non-Class. Mono",
+  T ~ all$predicted.celltype
+)
+names(celltype_cor) <- colnames(all)
+all$celltype_cor <- celltype_cor
+```
+
+### Figure panel 1b
+```{r Figure panel b, warning=FALSE,message=FALSE}
+DimPlot(all, label = T, pt.size = 1, repel = T) +
+  scale_color_manual(values = c(colors_many, colors,unname(palette_green()))[-c(14,21,28,37)]) +
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+```
+```{r source data F1b, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1b
+data.frame(UMAP_1=all@reductions$umap@cell.embeddings[,"UMAP_1"] ,
+            UMAP_2=all@reductions$umap@cell.embeddings[,"UMAP_2"] ,
+            cluster=all$seurat_clusters) %>% 
+  left_join(data.frame(cluster=levels(all),
+                       colors=c(colors_many,colors,unname(palette_green()))[-c(14,21,28,37)][1:length(levels(all))])) %>% 
+  #ggplot(aes(UMAP_1,UMAP_2, color=colors)) + geom_point()+ scale_color_identity()
+  write.csv(file.path("data","source_data","panel_F1b.csv"))
+```
+
+### Figure panel 1c - top panel
+```{r Figure panel 1c top,warning=FALSE,message=FALSE}
+DimPlot(all, group.by = "compartment", label = T, pt.size = 1, repel = T) +
+  scale_color_tq(theme = "dark") +
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+```
+```{r source data F1c_top, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1c top
+data.frame(UMAP_1=all@reductions$umap@cell.embeddings[,"UMAP_1"] ,
+            UMAP_2=all@reductions$umap@cell.embeddings[,"UMAP_2"] ,
+            compartment=all$compartment) %>% 
+  left_join(data.frame(compartment=unique(all$compartment),
+                       colors=rev(unname(palette_dark())[c(3,4,2,1)]))) %>% 
+  #ggplot(aes(UMAP_1,UMAP_2, color=colors)) + geom_point()+ scale_color_identity()
+  write.csv(file.path("data","source_data","panel_F1c_top.csv"))
+```
+
+### Figure panel 1c - bottom panel
+```{r Figure panel 1c bottom,warning=FALSE,message=FALSE}
+all[[]] %>% 
+  mosaicGG2(X="seurat_clusters",FILL="compartment", colors = unname(palette_dark())) 
+```
+```{r source data F1c_bottom, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1c bottom
+data.frame(cluster=all$seurat_clusters,
+            compartment=all$compartment) %>% 
+  left_join(data.frame(compartment=unique(all$compartment),
+                       colors=rev(unname(palette_dark())[c(3,4,2,1)]))) %>% 
+  group_by(cluster,compartment) %>% 
+  summarise(count=n()) %>% 
+  write_csv(file.path("data","source_data","panel_F1c_bottom.csv"))
+```
+
+### Statistical testing of the distribution of the compartments per cluster
+```{r Statistical testing of the compartments, warning=FALSE, message=FALSE}
+all[[]] %>% 
+  hyper_test_n(var1="seurat_clusters",var2="compartment")
+```
+### Determine differentially expressed genes and subset for the top 20 cluster markers
+```{r differential gene expression, warning=FALSE, message=FALSE}
+if (!file.exists(file.path("data","cluster_markers_ctrl_10x_multimodal_harmony.RData"))) {
+  all_markers <- FindAllMarkers(all)
+  save(all_markers, file = file.path("data","cluster_markers_ctrl_10x_multimodal_harmony.RData"))
+} else {
+  load(file.path("data","cluster_markers_ctrl_10x_multimodal_harmony.RData"))
+}
+
+## get top 20 marker genes per cluster
+top20 <- all_markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC) 
+top20
+```
+
+### Figure panel 1d
+```{r Figure panel 1d, warning=FALSE, message=FALSE}
+heat <- DoHeatmap(all,features = top20$gene, group.colors = c(colors_many, colors,unname(palette_green()))[-c(14,21,28,37)])
+heat + scale_fill_viridis(option = "A")
+```
+
+```{r source data F1d, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1d
+mat <- all[["RNA"]]@scale.data[top20$gene[top20$gene %in% rownames(all[["RNA"]]@scale.data)],] 
+colnames(mat) <- all$seurat_clusters
+mat2 <- Matrix(mat, sparse = T)
+save(mat2, file = file.path("data","source_data","panel_F1d.RData"))
+write.csv(mat, file.path("data","source_data","Fig1d.csv"))
+```
+
+### Figure panel 1e - cluster marker heatmap
+```{r Figure panel 1e, warning=FALSE, message=FALSE}
+prot_validation <- read.csv2(file.path("data","cell_count_validation_LM.csv"))
+
+## stat.testing
+stat.test <- dunn_test(formula = cell_density ~ Antigen, data = prot_validation) %>% 
+  filter(p.adj.signif != "ns") 
+
+prot_validation %>% 
+  mutate(Antigen=factor(Antigen, levels=rev(c("Iba1","CD1c","CD3","CD20","CD38"))) ) %>% 
+  ggplot(aes(x=Antigen,y=cell_density)) +
+  geom_jitter(pch=21, fill="grey", size=5, height = 0, width = .05) +
+  stat_summary(fun = "mean", geom = "crossbar", width=1, size=1) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", width=0, size=1) +
+  expand_limits(x=c(0.5,1.5)) +
+  scale_y_continuous(breaks = c(0,5,10)) +
+  ## modified from url: https://github.com/kassambara/ggpubr/issues/102
+  stat_pvalue_manual(
+    stat.test, label = "p.adj", 
+    y.position = c(10.1,11.1,12.1, 13.1,14.1,15.1),
+    coord.flip = T
+  )+
+  theme_linedraw() +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.y = element_blank(),
+        text = element_text(size=25)) +
+  labs(y="cells/mm", x=element_blank()) +
+  coord_flip()
+
+```
+
+```{r source data F1e, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1e
+read.csv2(file.path("data","cell_count_validation_LM.csv"))[,c(1,4)] %>% 
+  write.csv(file.path("data","source_data","panel_F1e.csv"))
+```
+
+### Figure panel 1f - homing signature UMAPs
+```{r Figure panel 1f, warning=FALSE, message=FALSE}
+homing <- c("myeloid_homing_UCell","lymphocyte_homing_UCell")
+
+walk(homing, function(x) print(FeaturePlot(all, x) + scale_color_distiller(palette = "Reds", direction = 1)+ theme_void()))
+```
+
+```{r source data F1f, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1g
+data.frame(UMAP_1=all@reductions$umap@cell.embeddings[,"UMAP_1"] ,
+           UMAP_2=all@reductions$umap@cell.embeddings[,"UMAP_2"] ,
+           all[[]][,c("myeloid_homing_UCell","lymphocyte_homing_UCell")]) %>% 
+  write.csv(file.path("data","source_data","panel_F1f.csv"))
+```
+
+
+### Figure panel 1g - subset marker gene heatmap and donut plot
+```{r Figure panel 1g, warning=FALSE, message=FALSE}
+## subset for the macrophage clusters and determine differential genes per compartment
+cams <- subset(all, subset=seurat_clusters %in% c("19","26","22","20"))
+
+levels(cams) <- c("19","26","22","20")
+cams_markers <- FindAllMarkers(cams,
+                                      logfc.threshold = 0.01,
+                                      min.pct = 0.01)
+top12 <- cams_markers %>% 
+  filter(p_val_adj<.05) %>% 
+  group_by(cluster) %>% 
+  top_n(12, wt=avg_log2FC) 
+
+mean_expr <- data.frame(t(as.matrix(cams[["RNA"]]@data[unique(top12$gene),])), "cluster"=cams$seurat_clusters) %>%  
+  group_by(cluster) %>% 
+  summarise_all(.funs = mean) %>% 
+  as.data.frame()
+
+rownames(mean_expr) <- factor(mean_expr$cluster, levels =c("19","26","22","20") )
+mean_expr$cluster <- NULL
+mat <- scale(as.matrix(mean_expr))
+Heatmap(mat, 
+        width = ncol(mat)*unit(3, "mm"), 
+        height = nrow(mat)*unit(3, "mm"))
+
+## donut plots for compartment distributions
+#donut plot of cell types
+meta2 <- cams[[]] %>%
+  group_by(seurat_clusters, compartment) %>% 
+  summarise(freq=n()) %>% 
+  mutate(rel_freq = freq / sum(freq))
+
+#plot donuts
+meta2 %>%
+  ggplot(aes(x=2, y=freq,fill=compartment)) +
+  geom_bar(position = 'fill', stat = 'identity', color='black', lwd=0.1) +
+  coord_polar(theta='y', start=0) +
+  theme_void() +
+  scale_fill_tq(theme = "dark") +
+  facet_wrap(~seurat_clusters, nrow = 1) +
+  xlim(0.5, 2.5)
+```
+
+```{r F1g bottom statistical testing, echo=FALSE,warning=FALSE,message=FALSE}
+## statistical testing for enrichment
+cams[[]] %>% 
+  droplevels() %>% 
+  hyper_test_n(var1 = "seurat_clusters",var2="compartment")
+
+```
+
+```{r source data F1g top, echo=FALSE,warning=FALSE,message=FALSE}
+## export metadata for panel figure 1g top
+write.csv(mat, file.path("data","source_data","panel_F1g_top.csv"))
+
+## export metadata for panel figure 1g bottom
+write.csv(meta2, file.path("data","source_data","panel_F1g_bottom.csv")) 
+
+```
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

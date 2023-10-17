@@ -1,0 +1,69 @@
+---
+title: "Figure-extended-data-Figure-4-code"
+output: html_notebook
+---
+
+### Load packages
+```{r load packages, warning=FALSE, message=FALSE}
+library(Seurat)
+library(SeuratDisk)
+library(tidyverse)
+library(assertthat)
+library(tidyquant)
+library(clusterProfiler)
+library(viridis)
+```
+
+### Load seurat object and adjust metadata
+```{r Adjust metadata, warning=FALSE, message=FALSE}
+## load functions
+source(file.path("R","functions.R"))
+
+ctrl <- LoadH5Seurat(file.path("data","reference_mapped_celseq2_ctrl_cd206_gate_no_lowq_cells.H5Seurat"))
+ctrl <- PrepSCTFindMarkers(ctrl)
+
+## reorder clusters
+order_clusters <- data.frame(seurat_clusters= ctrl$seurat_clusters, row.names = rownames(ctrl[[]])) %>%
+  bind_cols(as.data.frame(t(ctrl[["SCT"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(ctrl) <- rev(order_clusters)
+ctrl$seurat_clusters <- factor(ctrl$seurat_clusters, levels = levels(ctrl))
+
+## adjust cell type assignment
+## reorder clusters
+ctrl$compartment_ind <- factor(ctrl$compartment_ind, levels = c("CP","PVM","DM","LM"))
+levels(ctrl$compartment_ind) <- c("CP","PC","DM","LM")
+
+```
+
+### Extended data 4 a-b
+```{r ED Figure 4a-b, warning=FALSE, message=FALSE}
+signatures <- c("macrophages_UCell","cDC2_UCell","myeloid_homing_UCell")
+
+walk(signatures, function(x) {
+  plt <- FeaturePlot(ctrl, x) +
+    scale_color_distiller(palette = "Reds", direction = 1) +
+    theme_void()
+  print(plt)
+})
+
+```
+
+```{r source data ED6ghi, echo=FALSE,warning=FALSE,message=FALSE}
+df <- data.frame("UMAP_1"=ctrl@reductions$umap@cell.embeddings[,1],
+                 "UMAP_2"=ctrl@reductions$umap@cell.embeddings[,2],
+                 ctrl[[]][,signatures])
+write.csv(df, file.path("data","source_data","panels_ED_Fig_4a_b.csv"))
+```
+
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

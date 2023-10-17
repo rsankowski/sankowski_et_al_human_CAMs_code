@@ -1,0 +1,398 @@
+---
+title: "Figure-extended-data-Figure-6-code"
+output: html_notebook
+---
+
+### Load packages and functions
+```{r Load packages, warning=FALSE, message=FALSE}
+library(EnhancedVolcano)
+library(UCell)
+library(ggpubr)
+library(rstatix)
+library(Seurat)
+library(SingleCellExperiment)
+library(harmony)
+library(scDblFinder)
+library(SeuratDisk)
+library(SeuratWrappers)
+library(assertthat)
+library(tidyquant)
+library(tidyverse)
+library(viridis)
+library(ComplexHeatmap)
+library(Matrix)
+library(tidyverse)
+library(readxl)
+library(broom)
+library(ggbeeswarm)
+library(RColorBrewer)
+library(scCustomize)
+library(SPATA2)
+library(NICHES)
+library(cowplot)
+library(NICHES)
+library(clusterProfiler)
+library(biomaRt)
+
+## load functions and colors
+source("R/functions.R")
+```
+
+### Extended Data Figure 6a - prepro
+```{r ED Figure 6a_preprocess, warning=FALSE,message=FALSE}
+
+if (!file.exists(file.path("data","immune_combined_with_Braun_Yang_et_al.H5Seurat"))) {
+  ## generate the immune combined object
+  immune_lin <- LoadH5Seurat(file.path("data","Linnarsson_developmental","immune_seurat_object.H5Seurat"))
+  immune_lin <- immune_lin %>% 
+    RunUMAP(dims = 1:30) %>% 
+    FindNeighbors(dims = 1:30) %>% 
+    FindClusters()
+  load(file.path("data","Linnarsson_developmental","metadata_Linnarsson_immune_subset_for_azimuth.RData"))
+  
+  cp <- LoadH5Seurat(file.path("data","Yang_et_al_CP_all_cells.H5Seurat"))
+  cp_immune <- subset(cp, subset = seurat_clusters == "9")
+  
+  immune <- subset(all, subset= seurat_clusters %in% c("9","23","12","22","26"))
+  immune_comb <- merge(immune, list(immune_lin[rownames(immune_lin) %in% rownames(immune),],
+                                    cp_immune))
+  immune_comb <- immune_comb %>% 
+    NormalizeData() %>% 
+    FindVariableFeatures(nfeatures=10000) %>% 
+    ScaleData(vars.to.regress = "percent.mt") %>% 
+    RunPCA() %>%
+    RunHarmony(group.by.vars = "experiment") %>% 
+    RunUMAP(reduction = "harmony", dims = 1:30) %>% 
+    FindNeighbors(reduction = "harmony", dims = 1:30) %>% 
+    FindClusters()
+  SaveH5Seurat(immune_comb, file.path("data","immune_combined_with_Braun_Yang_et_al.H5Seurat"))
+} else {
+  immune_comb <- LoadH5Seurat(file.path("data","immune_combined_with_Braun_Yang_et_al.H5Seurat"))
+}
+
+## set cluster order
+## reorder clusters
+order_clusters <- data.frame(seurat_clusters= immune_comb$seurat_clusters, row.names = rownames(immune_comb[[]])) %>%
+  bind_cols(as.data.frame(t(immune_comb[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(immune_comb) <- rev(order_clusters)
+immune_comb$seurat_clusters <- factor(immune_comb$seurat_clusters, levels = levels(immune_comb))
+
+## adjust cell type assignment
+## reorder clusters
+compartment_cor <- case_when(grepl("CP",immune_comb$compartment) ~ "CP",
+                             grepl("13800",immune_comb$Pat_ID) ~ "LM",
+                             T~immune_comb$compartment)
+names(compartment_cor) <- colnames(immune_comb)
+immune_comb$compartment_cor <- factor(compartment_cor, levels = c("CP","PC","LM"))
+
+## add dataset
+immune_comb$dataset <- case_when(grepl("^Linn", immune_comb$experiment) ~ "Braun et al.",
+                                 grepl("Yang", immune_comb$experiment) ~ "Yang et al.",
+                                 T ~ "Present study")
+immune_comb$dataset <- factor(immune_comb$dataset, levels = c("Braun et al.","Yang et al.","Present study"))
+
+## add timepoint
+timepoint_cor <- case_when(immune_comb$timepoint == "CS21" ~ "7",
+                           immune_comb$timepoint == "CS23" ~ "8",
+                           T ~ immune_comb$timepoint)
+  
+timepoint_cor <- gsub("pcw","",timepoint_cor)
+names(timepoint_cor) <- colnames(immune_comb)
+
+immune_comb$timepoint_cor <- droplevels(factor(timepoint_cor, levels= c(as.character(5:23),"postnatal")))
+
+## define cluster colors
+clust_colors <- c(colors_many, colors_fig)[-c(14,21)][1:length(levels(immune_comb))]
+names(clust_colors) <- levels(immune_comb)
+
+## add DAM signature
+## DAM modules
+## find human homologs
+dams <- list("DAM"= data.frame("MGI.symbol"=c("Cts7","Lpl","Itgax","Spp1","Apoe","Csf1","Clec7a","Igf1","Axl","Ank","Cd63","Tyrobp","Ctsb","Ctsd","Ctsl","Cd9","Ctsz","Ccl6","Trem2")))
+  dams <- bind_rows(dams, .id = "term")
+  
+  ## find homologs
+  ensembl.human <-useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")   #useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+  ensembl.mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")  #useEnsembl("ensembl", dataset = "mmusculus_gene_ensembl")
+  
+  homologs = getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol", values = dams$MGI.symbol , mart = ensembl.mouse, attributesL = c("hgnc_symbol"), martL = ensembl.human, uniqueRows=T)
+  dams <- dams %>% 
+    left_join(homologs)
+  
+  dam_markers <- list("DAM"=homologs$HGNC.symbol[-7])
+
+## set the module scores
+immune_comb <- AddModuleScore(immune_comb, dam_markers, name = names( dam_markers))
+homing_scores <- ScoreSignatures_UCell(immune_comb[["RNA"]]@counts, features= dam_markers)
+immune_comb <- AddMetaData(immune_comb, as.data.frame(homing_scores))
+
+```
+### Figure panels Extended data Figure 6 a,b,d
+```{r ED Figure 6a-b, warning=FALSE, message=FALSE}
+signatures <- c("macrophages_UCell","microglia_UCell","G2M.Score", "S.Score","DAM_UCell")
+
+walk(signatures, function(x) {
+  plt <- FeaturePlot(immune_comb, x) +
+    scale_color_distiller(palette = "Reds", direction = 1) +
+    theme_void()
+  print(plt)
+})
+
+```
+### ED Figure 6 c
+```{r ED Figure 6c, warning=FALSE, message=FALSE}
+
+## subset the object for myeloid clusters
+myeloid <- immune_comb[, !immune_comb$seurat_clusters %in% c("16","11","15","19","17")]
+
+## adjust metadata
+myeloid$timepoint_cor <- droplevels(factor(timepoint_cor, levels= c(as.character(5:23),"postnatal")))
+
+celltype_cor <- case_when(myeloid$seurat_clusters %in% c("7","1","2","14","3","12","6","5","4") & myeloid$compartment_cor !="CP" ~ "MG",
+                          myeloid$seurat_clusters %in% c("7","1","2","14","3","12","6","5","4") & myeloid$compartment_cor =="CP" ~ "Kolmer",
+                          myeloid$seurat_clusters %in% c("13","0","10","18")  ~ "CAMs",
+                          myeloid$seurat_clusters %in% c("8")  & myeloid$compartment_cor =="CP" ~ "Kolmer cells",
+                          myeloid$seurat_clusters %in% c("8")  ~ "MG",
+                          myeloid$seurat_clusters %in% c("9") & myeloid$macrophages_UCell > .1  ~ "CAMs",
+                          myeloid$seurat_clusters %in% c("9") & myeloid$microglia_UCell > .1  ~ "MG",
+                          myeloid$seurat_clusters %in% c("9")  ~ "Other prolif. cells",
+                          myeloid$seurat_clusters == "16" ~ "B cells",
+                          myeloid$seurat_clusters == "15" ~ "T cells",
+                          myeloid$seurat_clusters == "11" ~ "NK cells",
+                          myeloid$seurat_clusters == "17" ~ "Monocytes",
+                          myeloid$seurat_clusters == "19" ~ "Platelets",
+                          T ~ "other")
+
+names(celltype_cor) <- colnames(myeloid)
+myeloid$celltype_cor <- celltype_cor
+
+Idents(myeloid) <- myeloid$timepoint_cor
+
+myeloid <- subset(myeloid, subset = celltype_cor %in% c("CAMs","MG","Kolmer cells"))
+myeloid$celltype_cor <- factor(myeloid$celltype_cor, levels = c("CAMs","MG","Kolmer cells"))
+
+## bulk heatmaps for the cam and microglia genes
+Idents(myeloid) <- droplevels(myeloid$seurat_clusters)
+levels(myeloid) <- levels(droplevels(myeloid$seurat_clusters))
+
+## find markers
+if (!file.exists(file.path("data","hdbr_myeloid_cell_markers.RData"))) {
+  myeloid_markers <- FindAllMarkers(myeloid) 
+    
+  save(myeloid_markers, file = file.path("data","hdbr_myeloid_cell_markers.RData"))
+} else {
+  load(file.path("data","hdbr_myeloid_cell_markers.RData"))
+}
+
+top7 <- myeloid_markers %>% 
+  filter(avg_log2FC>0) %>% 
+  group_by(cluster) %>% 
+  top_n(7, wt = avg_log2FC)
+  
+mean_expr <- data.frame(t(as.matrix(myeloid[["RNA"]]@data[unique(top7$gene),])), "cluster"=myeloid$seurat_clusters) %>%  
+  group_by(cluster) %>% 
+  summarise_all(.funs = mean) %>% 
+  as.data.frame()
+
+rownames(mean_expr) <- mean_expr$cluster
+mean_expr$cluster <- NULL
+
+mat <- scale(as.matrix(mean_expr))
+Heatmap(mat, 
+        cluster_rows = T,
+        cluster_columns = T, 
+        clustering_method_rows = "average",
+        width = ncol(mat)*unit(5, "mm"), 
+        height = nrow(mat)*unit(5, "mm"))
+
+```
+
+```{r source data ED F4c, echo=FALSE,warning=FALSE,message=FALSE}
+
+write.csv(mat, file.path("data","source_data","panels_ED_Fig_6_c.csv"))
+```
+
+
+### Figure panels Extended data Figure 6 e
+```{r ED Figure 6e, warning=FALSE, message=FALSE}
+immune_comb$dataset2 <- factor(immune_comb$dataset, levels = c("Braun et al.","Yang et al.","Present study"))
+
+DimPlot(immune_comb, label = T, pt.size = .5, group.by = "dataset2") +
+  scale_color_brewer(palette = "Paired") +
+  labs(title = element_blank()) +
+  theme_void()
+
+```
+
+```{r source data ED6abde, echo=FALSE,warning=FALSE,message=FALSE}
+df <- data.frame("UMAP_1"=immune_comb@reductions$umap@cell.embeddings[,1],
+                 "UMAP_2"=immune_comb@reductions$umap@cell.embeddings[,2],
+                 "Dataset"=immune_comb$dataset2,
+                 immune_comb[[]][,signatures])
+write.csv(df, file.path("data","source_data","panels_ED_Fig_6a_b_d_e.csv"))
+```
+
+### Extended Data Figure 6f
+```{r ED Figure 6f, warning=FALSE, message=FALSE}
+
+## plot myeloid nuc seq signatures
+myeloid_nuc <- myeloid[,!myeloid$experiment %in% c("Linnasson_v2","Linnasson_v3")]
+
+## microglia signature 
+mg_cor <- myeloid_nuc[[]] %>% 
+  group_by(Pat_ID, celltype_cor, .drop = F) %>% 
+  mutate(cellcount=n(),
+         mean_dam=mean(microglia_UCell, na.rm=T)) %>% 
+  distinct(Pat_ID, celltype_cor, .keep_all = T) %>% 
+  filter(cellcount>1) 
+
+mg_cor %>% 
+  ggplot(aes(timepoint,mean_dam, group=celltype_cor)) +
+  geom_point(aes(color=compartment_cor), size=5, alpha=.5) +
+  geom_smooth(method = "lm", lwd=3) +
+  scale_color_manual(values = clust_colors[levels(myeloid_nuc$seurat_clusters)]) +
+  theme_linedraw() +
+  NoLegend() +
+  labs(y="Expression",x="Cluster",title = element_blank()) +
+  theme(text = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        axis.text.x = element_text( angle = 45,vjust = 1,hjust = 1),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  facet_wrap(~celltype_cor) +
+  stat_cor(size=5, label.y=.29) +
+  expand_limits(y=c(0,.3))
+ 
+
+## macrophage signature 
+dam_cor <- myeloid_nuc[[]] %>% 
+  group_by(Pat_ID, celltype_cor, .drop = F) %>% 
+  mutate(cellcount=n(),
+         mean_dam=mean(DAM_UCell, na.rm=T)) %>% 
+  distinct(Pat_ID, celltype_cor, .keep_all = T) %>% 
+  filter(cellcount>1) 
+dam_cor %>% 
+  ggplot(aes(timepoint,mean_dam, group=celltype_cor)) +
+  geom_point(aes(color=compartment_cor), size=5, alpha=.5) +
+  geom_smooth(method = "lm", lwd=3) +
+  scale_color_manual(values = clust_colors[levels(myeloid_nuc$seurat_clusters)]) +
+  theme_linedraw() +
+  NoLegend() +
+  labs(y="Expression",x="Cluster",title = element_blank()) +
+  theme(text = element_text(size = 10),
+        axis.text = element_text(size = 10),
+        axis.text.x = element_text( angle = 45,vjust = 1,hjust = 1),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  facet_wrap(~celltype_cor) +
+  stat_cor(size=5, label.y=.29) +
+  expand_limits(y=c(0,.3))
+
+
+```
+```{r source data ED F6f_top, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(dam_cor[,c("mean_dam","Pat_ID","timepoint")], file.path("data","source_data","panels_ED_Fig_6_f_top.csv"))
+write.csv(mg_cor[,c("mean_dam","Pat_ID","timepoint")], file.path("data","source_data","panels_ED_Fig_6_f_bottom.csv"))
+```
+
+### Extended Data Figure 6g
+```{r ED Figure 6g preprocess, warning=FALSE,message=FALSE}
+### load multi omics fetal data
+fetal <- LoadH5Seurat(file.path("data","reference_mapped_fetal.H5Seurat"))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= fetal$seurat_clusters, row.names = rownames(fetal[[]])) %>%
+  bind_cols(as.data.frame(t(fetal[["SCT"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(fetal) <- rev(order_clusters)
+fetal$seurat_clusters <- factor(fetal$seurat_clusters, levels = levels(fetal))
+
+## adjust cell types
+celltype_cor <- case_when(
+  fetal$seurat_clusters == "12" ~ "Neuroectodermal",
+  fetal$seurat_clusters == "5" ~ "B cells",
+  fetal$seurat_clusters %in% c("7") ~ "CAMs",
+  fetal$seurat_clusters %in% c("2") ~ "cDC2 & moMF",
+  fetal$seurat_clusters %in% c("1","0","9","11") & fetal$compartment == "CP" ~ "Kolmer cells",
+  fetal$seurat_clusters %in% c("1","0","9","11") & fetal$compartment != "CP" ~ "MG",
+  fetal$seurat_clusters %in% c("10","6","8") ~ "Class. Mono",
+  fetal$seurat_clusters %in% c("14") ~ "moMF",
+  fetal$seurat_clusters == "15" ~ "Non-Class. Mono",
+  fetal$seurat_clusters == "16" & fetal$microglia_UCell > .25 ~ "Prolif. MG",
+  fetal$seurat_clusters == "16" & fetal$macrophages_UCell > .25 ~ "Prolif. CAMs",
+  fetal$seurat_clusters == "16" ~ "Other prolif. cell",
+  fetal$seurat_clusters %in% c("3") ~ "NK",
+  fetal$seurat_clusters %in% c("13","4") ~ "T cells",
+  fetal$seurat_clusters %in% c("17") ~ "pDCs",
+  T ~ fetal$predicted.celltype
+)
+names(celltype_cor) <- colnames(fetal)
+fetal$celltype_cor <- celltype_cor
+
+## set compartment as factor
+fetal$compartment <- factor(fetal$compartment, levels = c("CP","CTX","LM"))
+levels(fetal$compartment) <- c("CP","PC","LM")
+
+## plot clusters
+DimPlot(fetal, label = T, pt.size = 1, repel = T) +
+  scale_color_manual(values = c(colors_many, colors,unname(palette_green()))[-c(14,21,28)]) +
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+
+```
+### Extended Data Figure 6h
+```{r ED Figure 6h, warning=FALSE,message=FALSE}
+DimPlot(fetal, group.by = "compartment", label = T, pt.size = 1, repel = T) +
+  scale_color_manual(values = unname(palette_dark())[c(1:2,4)]) +
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+
+fetal[[]] %>% 
+  mosaicGG2(X="seurat_clusters",FILL="compartment", colors = unname(palette_dark())[c(1:2,4)])
+```
+
+### Extended Data Figure 6i
+```{r ED Figure 6i, warning=FALSE,message=FALSE}
+DimPlot(fetal, group.by = "timepoint", label = T, pt.size = 1, repel = T) +
+  scale_color_brewer(palette = "Set2") +
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+
+## plot timepoint marimekko
+fetal[[]] %>% 
+  mosaicGG2(X="seurat_clusters",FILL="timepoint") +
+  scale_fill_brewer(palette = "Set2")
+```
+```{r source data ED6ghi, echo=FALSE,warning=FALSE,message=FALSE}
+df <- data.frame("UMAP_1"=fetal@reductions$umap@cell.embeddings[,1],
+                 "UMAP_2"=fetal@reductions$umap@cell.embeddings[,2],
+                 "Cluster"=fetal$seurat_clusters,
+                 "Celltype"=fetal$celltype_cor,
+                 "Timepoint"=fetal$timepoint,
+                 "Compartment"=fetal$compartment)
+write.csv(df, file.path("data","source_data","panels_ED_Fig_6g_h_i.csv"))
+```
+
+
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

@@ -1,0 +1,191 @@
+---
+title: "Seurat workflow for Figure 3"
+output: html_notebook
+---
+
+### Load the seurat packages
+```{r Load packages, warning=FALSE, message=FALSE}
+library(SingleCellExperiment)
+library(scuttle)
+library(scDblFinder)
+library(Seurat)
+library(SeuratDisk)
+library(tidyverse)
+library(assertthat)
+library(cowplot)
+library(scCustomize)
+library(UCell)
+```
+### Load counts data and remove doublets
+```{r}
+## run Seurat
+if (!file.exists(file.path("data","harmony_integrated_nucseq_all_cells.H5Seurat"))) {
+  ## load data
+fls <- list.files(file.path("data","counts_nucseq_fetal_adult"))
+
+lst_clplx <- map(fls[6:length(fls)], function(x) {
+  tryCatch({
+    fls2 <- list.files(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs"))
+    map(fls2, function(i) {
+      tryCatch({
+          .obj <- Read10X_h5(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs",i,"count","sample_filtered_feature_bc_matrix.h5"))
+          .obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`) %>% 
+            AddMetaData(i, "Pat_ID") %>% 
+            AddMetaData(x, "sample") %>% 
+            AddMetaData("fetal_with_multiplexing", "experiment") %>% 
+            AddMetaData(factor(gsub(".*_","",.$Pat_ID), levels = c("CS21","CS23","9pcw","11pcw","12pcw","13pcw","14pcw","15pcw","17pcw","19pcw","20pcw","23pcw","postnatal")), "timepoint") %>% 
+            AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+            subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+          
+          .obj_seurat$compartment <- case_when(grepl("Par",.obj_seurat$Pat_ID) ~ "PC",
+                                               grepl("LM",.obj_seurat$Pat_ID) ~ "LM",
+                                               grepl("Men",.obj_seurat$Pat_ID) ~ "LM",
+                                               grepl("fCP",.obj_seurat$Pat_ID) ~ "frontal_brain_CP",
+                                               grepl("hCP",.obj_seurat$Pat_ID) ~ "hindbrain_CP",
+                                               T ~ "PC")
+          
+          ## exclude doublets
+          sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+          sce <- scDblFinder(sce)
+          .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+          
+          .obj_seurat
+      }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    })
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+## remove empty samples
+lst_clplx <- map(1:6, function(x) {
+  unlist(lst_clplx[[x]])
+})
+
+lst_no_cl <- map(fls[c(1:3)], function(x) {
+  tryCatch({
+    .obj <- Read10X_h5(file.path("data","counts_nucseq_fetal_adult",x,"outs","filtered_feature_bc_matrix.h5"))
+    .obj_seurat <- CreateSeuratObject(.obj) %>% 
+      AddMetaData(x, "Pat_ID") %>% 
+      AddMetaData(x, "sample") %>% 
+      AddMetaData(ifelse(x=="adult-control-mixed","adult_no_multiplexing","fetal_no_multiplexing"), "experiment") %>% 
+      AddMetaData(factor(ifelse(x=="mixed-control", "postnatal", gsub(".*_","",.$Pat_ID)), levels = c("CS21","CS23","9pcw","11pcw","12pcw","13pcw","14pcw","15pcw","17pcw","19pcw","20pcw","23pcw","postnatal")), "timepoint") %>% 
+      AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+      subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+    
+    .obj_seurat$compartment <- case_when(grepl("Par",.obj_seurat$sample) ~ "PC",
+                                         grepl("LM",.obj_seurat$sample) ~ "LM",
+                                         grepl("Men",.obj_seurat$sample) ~ "LM",
+                                         grepl("fCP",.obj_seurat$Pat_ID) ~ "frontal_brain_CP",
+                                         grepl("hCP",.obj_seurat$Pat_ID) ~ "hindbrain_CP",
+                                         T ~ "PC")
+    
+    ## exclude doublets
+    sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+    sce <- scDblFinder(sce)
+    .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+    
+    .obj_seurat
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+lst_clplx_lm <- map(fls[4:5], function(x) {
+  tryCatch({
+    fls3 <- list.files(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs"))
+    
+    map(grep("LM$",fls3,value = T), function(i) {
+      tryCatch({
+        .obj <- Read10X_h5(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs",i,"count","sample_filtered_feature_bc_matrix.h5"))
+        .obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`) %>% 
+          AddMetaData(i, "Pat_ID") %>% 
+          AddMetaData(x, "sample") %>% 
+          AddMetaData(ifelse(x=="LM_GB","adult_with_multiplexing_1","adult_with_multiplexing_2"), "experiment") %>% 
+          AddMetaData(factor("postnatal", levels = c("CS21","CS23","9pcw","11pcw","12pcw","13pcw","14pcw","15pcw","17pcw","19pcw","20pcw","23pcw","postnatal")), "timepoint") %>% 
+          AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+          subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+        
+        .obj_seurat$compartment <- case_when(grepl("Par",.obj_seurat$sample) ~ "PC",
+                                             grepl("LM",.obj_seurat$sample) ~ "LM",
+                                             grepl("Men",.obj_seurat$sample) ~ "LM",
+                                             grepl("fCP",.obj_seurat$sample) ~ "frontal_brain_CP",
+                                             grepl("hCP",.obj_seurat$sample) ~ "hindbrain_CP",
+                                             T ~ "PC")
+        
+        ## exclude doublets
+        sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+        sce <- scDblFinder(sce)
+        .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+        
+        .obj_seurat
+      }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    })
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+## remove empty samples
+lst_clplx_lm <- map(1:2, function(x) {
+  unlist(lst_clplx_lm[[x]])
+})
+
+## merge lists
+lst2 <- map(lst_clplx, Merge_Seurat_List)
+lst3 <- map(lst_clplx_lm, Merge_Seurat_List)
+
+lst_all <- c(lst2, lst_no_cl, lst3)
+all <- Merge_Seurat_List(lst_all, add.cell.ids = as.character(1:11))
+
+all <- all %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures(nfeatures=10000) %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+all <- RunHarmony(all, group.by.vars = "experiment")
+all <- RunUMAP(all, reduction = "harmony", dims = 1:30)
+all <- FindNeighbors(all, reduction = "harmony", dims = 1:30) %>% FindClusters()
+
+## reference mapping of the celltypes
+load(file.path("data","counts_Linnarsson_data_subset_for_azimuth.RData"))
+load(file.path("data","metadata_Linnarsson_data_subset_for_azimuth.RData"))
+
+reference <- counts_sample[which(rownames(counts_sample) %in% rownames(all)),] %>% 
+  CreateSeuratObject() %>% 
+  AddMetaData(df_sample) %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures(nfeatures=10000) %>% 
+  ScaleData() %>% 
+  RunPCA() %>% 
+  RunUMAP(dims = 1:30)
+
+## map data  
+fetal.anchors <- FindTransferAnchors(reference = reference, query = all,
+                                        dims = 1:30, reference.reduction = "pca")
+predictions <- TransferData(anchorset = fetal.anchors, refdata = reference$celltype,
+                            dims = 1:30)
+all <- AddMetaData(all, metadata = predictions)
+
+## load reference for the CP data
+ cp_reference <- readRDS(file.path("data","COVID-19_brain_snRNA-seq_choroid_plexus_final_seurat_v3.2.3.rds")) ## downloaded from url: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE159812 and placed in the data folder
+
+## generate the subset of this data
+cp_reference <- subset(cp_reference, subset = Biogroup == "Control" & Disease == "Non-viral")
+
+## map cp data  
+cp.anchors <- FindTransferAnchors(reference = cp_reference, query = all,
+                                  dims = 1:30, reference.reduction = "pca")
+cp_predictions <- TransferData(anchorset = cp.anchors, refdata = cp_reference$cellID2,
+                               dims = 1:30)
+colnames(cp_predictions) <- paste0("CP_",colnames(cp_predictions))
+all <- AddMetaData(all, metadata = cp_predictions)
+
+## save object
+SaveH5Seurat(all, filename = file.path("data","harmony_integrated_nucseq_all_cells.H5Seurat"))
+} else {
+  all <- LoadH5Seurat(file.path("data","harmony_integrated_nucseq_all_cells.H5Seurat"))
+}
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+

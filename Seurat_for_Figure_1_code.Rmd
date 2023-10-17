@@ -1,0 +1,328 @@
+---
+title: "Figure 1"
+output: html_notebook
+---
+
+This is the code accompanying Figure 1 of Sankowski et al, Nat Medicine 2023 study. Prior to plotting we loaded the counts files. <br>
+
+### Open required R packages
+```{r Open R packages, message=FALSE, warning=FALSE}
+## load the required packages
+library(SingleCellExperiment)
+library(scDblFinder)
+library(Seurat)
+library(SeuratDisk)
+library(tidyverse)
+library(assertthat)
+library(cowplot)
+library(scCustomize)
+library(UCell)
+library(harmony)
+library(biomaRt)
+```
+
+
+### Load the counts files
+```{r Load counts files, message=FALSE, warning=FALSE}
+## The data from the experiments was loaded separately from the data/counts folder and individual seurat objects were generated.
+## The filtering criteria were: more than 200 and fewer than 4000 detected genes and fewer than 20 percent mitochondrial transcripts per cell.
+## Doublets were detected using the scDblFinder and excluded.
+
+## dataset 1
+      fls1 <- list.files(file.path("data","counts_border_region_multiome","CAM_FB-CPLX","outs","per_sample_outs"))
+      obj1 <- map(fls1, function(x) {
+        tryCatch({
+          .obj <- Read10X_h5(file.path("data","counts_border_region_multiome","CAM_FB-CPLX","outs","per_sample_outs",x,"count","sample_filtered_feature_bc_matrix.h5"))
+          .obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`, min.cells = 1, min.features = 500) %>% 
+            AddMetaData(x, "sample") %>% 
+            AddMetaData("Exp1", "experiment") %>% 
+            AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+            subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+          
+          .obj_seurat$compartment <- case_when(grepl("DM",.obj_seurat$sample) ~ "DM",
+                                               grepl("LM",.obj_seurat$sample) ~ "LM",
+                                               grepl("Men",.obj_seurat$sample) ~ "LM",
+                                               grepl("CP",.obj_seurat$sample) ~ "CP",
+                                               T ~ "CTX")
+          .obj_seurat$diagnosis <- case_when(grepl("GB", .obj_seurat$sample)~ "GB",
+                                             T~ "Ctrl")
+          
+          .obj_seurat[["ADT"]] <- CreateAssayObject(.obj$`Antibody Capture`[,colnames(.obj_seurat)])
+          
+          ## exclude doublets
+          sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+          sce <- scDblFinder(sce)
+          .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+          
+          .obj_seurat
+        }, error=function(e){})
+      })
+
+## dataset 2
+      fls2 <- list.files(file.path("data","counts_border_region_multiome","S1_Ctrl_LM_CP_PC","outs","per_sample_outs"))
+      
+      ## filter out fetal data
+      fls2 <- fls2[!grepl("FR210",fls2)]
+      obj2 <- map(fls2, function(x) {
+        tryCatch({
+          .obj <- Read10X_h5(file.path("data","counts_border_region_multiome","S1_Ctrl_LM_CP_PC","outs","per_sample_outs",x,"count","sample_filtered_feature_bc_matrix.h5"))
+          .obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`, min.cells = 1, min.features = 500) %>% 
+            AddMetaData(x, "sample") %>% 
+            AddMetaData("Exp2", "experiment") %>% 
+            AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+            subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+          
+          .obj_seurat$compartment <- case_when(grepl("DM",.obj_seurat$sample) ~ "DM",
+                                               grepl("LM",.obj_seurat$sample) ~ "LM",
+                                               grepl("Men",.obj_seurat$sample) ~ "LM",
+                                               grepl("CP",.obj_seurat$sample) ~ "CP",
+                                               T ~ "CTX")
+          .obj_seurat$diagnosis <- case_when(grepl("GB", .obj_seurat$sample)~ "GB",
+                                             T~ "Ctrl")
+          
+          .obj_seurat[["ADT"]] <- CreateAssayObject(.obj$`Antibody Capture`[,colnames(.obj_seurat)])
+          
+          ## exclude doublets
+          sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+          sce <- scDblFinder(sce)
+          .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+          
+          .obj_seurat
+        }, error=function(e){})
+      })
+
+## dataset 4
+      fls4 <- list.files(file.path("data","counts_border_region_multiome","S3","outs","per_sample_outs"))
+      
+      ## filter out other data
+      fls4 <- fls4[!grepl("(MGM|GB)",fls4)]
+      obj4 <- map(fls4, function(x) {
+        tryCatch({
+          .obj <- Read10X_h5(file.path("data","counts_border_region_multiome","S3","outs","per_sample_outs",x,"count","sample_filtered_feature_bc_matrix.h5"))
+          .obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`, min.cells = 1, min.features = 500) %>% 
+            AddMetaData(x, "sample") %>% 
+            AddMetaData("Exp4", "experiment")  %>% 
+            AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+            subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+          
+          .obj_seurat$compartment <- case_when(grepl("DM",.obj_seurat$sample) ~ "DM",
+                                               grepl("LM",.obj_seurat$sample) ~ "LM",
+                                               grepl("Men",.obj_seurat$sample) ~ "LM",
+                                               grepl("CP",.obj_seurat$sample) ~ "CP",
+                                               T ~ "CTX")
+          
+          .obj_seurat$diagnosis <- case_when(grepl("GB", .obj_seurat$sample)~ "GB",
+                                             T~ "Ctrl")
+          
+          .obj_seurat[["ADT"]] <- CreateAssayObject(.obj$`Antibody Capture`[,colnames(.obj_seurat)])
+          
+          ## exclude doublets
+          sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+          sce <- scDblFinder(sce)
+          .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+          
+          .obj_seurat
+          
+        }, error=function(e){})
+      })
+      
+      names(obj4) <- fls4
+
+## dataset 5
+      comps <- c("men", "cp")
+      
+      obj5 <- map(comps, function(x) {
+        .obj <- Read10X_h5(file.path("data","counts_border_region_multiome",x,"outs","filtered_feature_bc_matrix.h5")) %>% 
+          CreateSeuratObject(min.cells = 1, min.features = 500) %>% 
+          AddMetaData(paste0("mixed_",x), "sample") %>% 
+          AddMetaData(paste0("Exp5_",x), "experiment") %>% 
+          AddMetaData(toupper(x), "compartment") %>% 
+          AddMetaData("Ctrl","diagnosis") %>% 
+          AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+          subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+        
+        .obj$compartment <- case_when(grepl("DM",.obj$sample) ~ "DM",
+                                             grepl("LM",.obj$sample) ~ "LM",
+                                             grepl("men",.obj$sample) ~ "LM",
+                                             grepl("cp",.obj$sample) ~ "CP",
+                                             T ~ "CTX")
+        
+        .obj$diagnosis <- case_when(grepl("GB", .obj$sample)~ "GB",
+                                           T~ "Ctrl")
+        
+        ## exclude doublets
+        sce <- SingleCellExperiment(assays=list(counts=.obj@assays$RNA@counts))
+        sce <- scDblFinder(sce)
+        .obj <- .obj[,sce@colData$scDblFinder.class == "singlet"]
+       
+        .obj
+      })
+      
+      names(obj5) <- comps
+
+```
+
+### Merge the different datasets
+```{r}
+## After loading the lists were merged. Then they were normalized and scaled using SCTransform
+      all <- list(Merge_Seurat_List(obj1[unlist(lapply(obj1, length))>0], add.cell.ids=names(obj1)), 
+                  Merge_Seurat_List(obj2[unlist(lapply(obj2, length))>0], add.cell.ids=names(obj2)), 
+                  Merge_Seurat_List(obj4[unlist(lapply(obj4, length))>0], add.cell.ids=names(obj4)), 
+                  Merge_Seurat_List(obj5[unlist(lapply(obj5, length))>0], add.cell.ids=names(obj5)))
+      
+      all <- map(all, function(x) SCTransform(x,variable.features.n = 10000, verbose = F))
+
+```
+
+
+To classify differant immune cell populations, we ran the seurat reference mapping workflow found here: https://satijalab.org/seurat/articles/multimodal_reference_mapping.html
+reference <-. <br>
+
+### Run reference mapping
+```{r Reference mapping of control cells, message=FALSE, warning=FALSE}
+## load the pbmc seurat reference dataset that was previuosly downloaded from here: https://atlas.fredhutch.org/data/nygc/multimodal/pbmc_multimodal.h5seurat
+reference <- LoadH5Seurat(file.path("data","pbmc_multimodal.h5seurat"))
+
+## adjust the future globals site to avoid errors
+options(future.globals.maxSize= 891289600)
+
+## run reference mapping 
+
+## Computing a cached neighbor index
+reference <- FindNeighbors(
+  object = reference,
+  reduction = "spca",
+  dims = 1:50,
+  graph.name = "spca.annoy.neighbors", 
+  k.param = 50,
+  cache.index = TRUE,
+  return.neighbor = TRUE,
+  l2.norm = TRUE,
+  verbose = F
+)
+
+## mapping
+anchors <- map (all, function(x) {
+ FindTransferAnchors(
+    reference = reference,
+    query = x,
+    k.filter = NA,
+    reference.reduction = "spca", 
+    reference.neighbors = "spca.annoy.neighbors", 
+    dims = 1:50,
+    verbose = F)
+})
+
+## query
+
+all <- map(1:4, function(x) {
+  MapQuery(
+    anchorset = anchors[[x]], 
+    query = all[[x]],
+    reference = reference, 
+    refdata = list(
+      celltype = "celltype.l2", 
+      celltype2 = "celltype.l1", 
+      celltype3 = "celltype.l3", 
+      predicted_ADT = "ADT"),
+    reference.reduction = "spca",
+    reduction.model = "wnn.umap",
+    verbose = F
+  )
+})
+
+## merge datasets and generate new UMAP
+#merge reference and query
+refquery <- Merge_Seurat_List(all, add.cell.ids=1:4)
+spca <- merge(all[[1]][["ref.spca"]], y=c(all[[2]][["ref.spca"]], all[[3]][["ref.spca"]], all[[4]][["ref.spca"]]))
+spca <- RenameCells(spca,colnames(refquery))
+refquery[["spca"]] <- spca
+refquery <- RunUMAP(refquery, reduction = 'spca', dims = 1:50)
+refquery <- refquery %>% 
+  FindNeighbors(reduction = 'spca', dims = 1:50) %>% 
+  FindClusters()
+
+## prepare for find markers
+refquery <- PrepSCTFindMarkers(refquery)
+
+
+```
+
+### Add gene expression module information to the cells
+```{r Add gene expression modules, message=FALSE, warning=FALSE}
+## add modules
+## define the disease associated miroglia (DAM) module from mouse data
+dams <- list("DAM"= data.frame("MGI.symbol"=c("Cts7","Lpl","Itgax","Spp1","Apoe","Csf1","Clec7a","Igf1","Axl","Ank","Cd63","Tyrobp","Ctsb","Ctsd","Ctsl","Cd9","Ctsz","Ccl6","Trem2")))
+dams <- bind_rows(dams, .id = "term")
+
+## find human homologs
+ensembl.human <-useMart("ensembl", dataset = "hsapiens_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")   #useEnsembl("ensembl", dataset = "hsapiens_gene_ensembl")
+ensembl.mouse <- useMart("ensembl", dataset = "mmusculus_gene_ensembl", host = "https://dec2021.archive.ensembl.org/")  #useEnsembl("ensembl", dataset = "mmusculus_gene_ensembl")
+
+homologs = getLDS(attributes = c("mgi_symbol"), filters = "mgi_symbol", values = dams$MGI.symbol , mart = ensembl.mouse, attributesL = c("hgnc_symbol"), martL = ensembl.human, uniqueRows=T)
+dams <- dams %>% 
+  left_join(homologs)
+
+## add gene modules 
+## the homing markers are taken from Travaglini et al, Nature 2020 at: https://www.nature.com/articles/s41586-020-2922-4
+homing_markers <- list("general_homing"=c("CREM","RGS2","SLA","NFE2L2"),
+                       "lymphocyte_homing"=c("CD69","RGS1","LMNA","RGCC","DUSP6","SOCS1"),
+                       "myeloid_homing"=c("AREG","THBD","MPHOSPH6","PLAUR","HBEGF","MERTNL","GNAI3","IL1B","BRE-AS1"),
+                       "monocytes"=c('CCR2', 'CLEC12A', 'PLAC8', 'FCN1', 'S100A9'),
+                       "macrophages"=c("MRC1", "MS4A7", "CD163", "LYVE1", "STAB1"),
+                       "microglia"= c('P2RY12','TMEM119', 'SLC2A5'),
+                       "tcell"=c('TRAC', 'TRBC2', 'CD52', 'IL32'),
+                       "nk"=c("NKG7","KLRB1","PRF1","GZMB","GZMA"),
+                       "myeloid"=c('ITGAM',  'MS4A6A', 'TYROBP', 'CD14'),
+                       "oligodendrocyte"=c('MBP',  'MOG', 'MAG', 'PLP1'),
+                       "bcells"=c('CD79A', 'IGHG4', 'IGLL5'),
+                       "apc"=c("CD74", "CD80", "CD86", "HLA-DRA", "CD40"),
+                       "pDC"=c("IL3RA","LILRA4","TCF4","SELL","LTB"),
+                       "cDC1"=c("XCR1", "CLEC9A","CADM1", "IRF8","BATF3"),
+                       "cDC2"=c("FCER1A", "CLEC10A", "CD1C","CST7","CCR6"),
+                       "MigDCs"= c("CCR7", "LAMP3", "SAMSN1"),
+                       "Endothelial_Cells"=c("HSPG2","PLVAP","FLT1","VWF","CD34"),
+                       "astrocyte"=c("GFAP", "HEPACAM","SOX9","AQP4"),
+                       "DAM"=homologs$HGNC.symbol
+)
+
+## set the module scores
+refquery <- AddModuleScore(refquery, homing_markers, name = names(homing_markers))
+homing_scores <- ScoreSignatures_UCell(refquery[["SCT"]]@counts, features=homing_markers)
+refquery <- AddMetaData(refquery, as.data.frame(homing_scores))
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+refquery <- CellCycleScoring(refquery, s.features = s.genes, g2m.features = g2m.genes)
+
+```
+
+### Integration of the data using Harmony <br>
+To remove experiment-dependent batch effects, we used the Harmony algorithm with the variable "experiment" as variable to regress.
+```{r Harmony integration, message=FALSE, warning=FALSE}
+## run Harmony
+refquery_hm <- refquery
+  DefaultAssay(refquery_hm) <- "RNA"
+  refquery_hm <- refquery_hm %>% 
+    NormalizeData(verbose=F) %>% 
+    FindVariableFeatures(nfeatures = 10000,
+                         verbose=F) %>% 
+    ScaleData(verbose=F) %>% 
+    RunPCA(verbose=F) %>% 
+    RunHarmony(group.by.vars = "experiment",
+               verbose=F) %>% 
+    RunUMAP(reduction = "harmony", 
+            dims = 1:30,
+            verbose=F) %>% 
+    FindNeighbors(reduction = "harmony", 
+                  dims = 1:30,
+                  verbose=F) %>% 
+    FindClusters(resolution = 1.5,
+                 verbose=F)
+  
+## save the data
+  SaveH5Seurat(refquery_hm, file= file.path("data","harmony_integrated_controls.H5Seurat"), overwrite = T)
+```
+

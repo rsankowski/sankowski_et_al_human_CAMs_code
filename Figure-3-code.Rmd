@@ -1,0 +1,682 @@
+---
+title: "Figure-3-code"
+output: html_notebook
+---
+
+### Load packages and functions
+```{r Load packages, warning=FALSE, message=FALSE}
+library(EnhancedVolcano)
+library(UCell)
+library(ggpubr)
+library(rstatix)
+library(Seurat)
+library(SingleCellExperiment)
+library(harmony)
+library(scDblFinder)
+library(SeuratDisk)
+library(SeuratWrappers)
+library(assertthat)
+library(tidyquant)
+library(tidyverse)
+library(viridis)
+library(ComplexHeatmap)
+library(Matrix)
+library(tidyverse)
+library(readxl)
+library(broom)
+library(ggbeeswarm)
+library(RColorBrewer)
+library(scCustomize)
+library(SPATA2)
+library(NICHES)
+
+## load functions and colors
+source("R/functions.R")
+```
+
+### Figure 3b
+```{r Figure 3b, warning=FALSE,message=FALSE}
+load(file.path("data","protein_validation_cams","protein_valid_cumulative_counts_quant.RData")) 
+
+prot_all$Compartment2 <- ifelse(prot_all$Localization == "CP Macs", "cpMΦ", 
+                                ifelse(prot_all$Localization == "Dura", "dMΦ", 
+                                       ifelse(prot_all$Localization == "CP Epi", "CP_epi",
+                                              ifelse(prot_all$Compartment == "PV", "pvMΦ",
+                                                     ifelse(prot_all$Localization == "Men", "mMΦ",prot_all$Compartment))))) %>%
+  factor(levels = c("Micr", "pvMΦ", "cpMΦ", "CP_epi", "mMΦ", "dMΦ"))
+
+prot_all$Antigen <- factor(prot_all$Antigen, levels = c("CD206_IBA1", "SIGLEC1_CD206", "SPP1_Iba1","S100A6_CD206","CD1C_IBA1", "CD163_CD206"))
+
+#define comparisons
+my_comparisons <- apply(expand.grid("pvMΦ",c("Micr",  "cpMΦ", "CP_epi", "mMΦ", "dMΦ"), stringsAsFactors = F), 1, list)
+my_comparisons <- lapply(my_comparisons, unlist)
+my_comparisons <- lapply(my_comparisons, unname)
+
+#define colors
+cols <- c(brewer.pal(4,"Set1"))
+my_cols <- c()
+my_cols[5:6] <- cols[3:2]
+my_cols[1:2] <- colors_fig[c(1,3)]
+my_cols[3:4] <- c("#CB4154","#EE7942")
+
+## plot
+walk(unique(prot_all$Antigen), function(x) {
+  plt <- prot_all %>%
+  filter(Antigen == x) %>%
+  ggplot(aes(x= Compartment2, y=median_ratio*100, fill=Compartment2)) +
+  geom_quasirandom(size=5, pch=21) +
+  stat_summary(fun = "median", geom="crossbar", color="black") +
+  expand_limits(y=c(0,1)) +
+  theme_linedraw() +
+  theme(legend.position = NaN,
+        axis.text.x = element_text(angle = 45, vjust = 0.95, hjust=1),
+        panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank()) +
+  scale_fill_manual(values = my_cols) +
+  stat_compare_means(comparisons = my_comparisons, hide.ns = T) +
+  labs(y="% pos. cells", x=element_blank()) +
+    expand_limits(y=c(0,100)) +
+    labs(title = x)
+
+  print(plt)
+})
+
+```
+
+```{r source data F3b_c, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 2e
+write.csv(prot_all, file.path("data","source_data","panel_F3b_c.csv"))
+```
+
+### Figure 3c 
+```{r Figure 3c, warning=FALSE,message=FALSE}
+#dendrogram of the celltypes
+prot_wide <- prot_all[,c("Antigen", "Compartment2", "mean_ratio")] %>% 
+  group_by(Compartment2, Antigen) %>% 
+  summarise(mean_ratio=mean(mean_ratio)) %>% #
+  pivot_wider(names_from = Antigen, values_from = mean_ratio) %>% 
+  as.data.frame()
+
+rownames(prot_wide) <- prot_wide$Compartment2
+prot_wide <- as.matrix(prot_wide[,-1])
+
+hc <- hclust(dist(scale(prot_wide)))
+plot(hc)
+```
+
+### Preprocess the data for Figure 3d - get the reference data
+```{r Figure 3d preprocess, warning=FALSE,message=FALSE}
+## run Seurat
+if (!file.exists(file.path("data","harmony_integrated_nucseq_all_cells.H5Seurat"))) {
+  ## load data
+fls <- list.files(file.path("data","counts_nucseq_fetal_adult"))
+
+lst_clplx <- map(fls[6:length(fls)], function(x) {
+  tryCatch({
+    fls2 <- list.files(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs"))
+    map(fls2, function(i) {
+      tryCatch({
+          .obj <- Read10X_h5(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs",i,"count","sample_filtered_feature_bc_matrix.h5"))
+          .obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`) %>% 
+            AddMetaData(i, "Pat_ID") %>% 
+            AddMetaData(x, "sample") %>% 
+            AddMetaData("fetal_with_multiplexing", "experiment") %>% 
+            AddMetaData(factor(gsub(".*_","",.$Pat_ID), levels = c("CS21","CS23","9pcw","11pcw","12pcw","13pcw","14pcw","15pcw","17pcw","19pcw","20pcw","23pcw","postnatal")), "timepoint") %>% 
+            AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+            subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+          
+          .obj_seurat$compartment <- case_when(grepl("Par",.obj_seurat$Pat_ID) ~ "PC",
+                                               grepl("LM",.obj_seurat$Pat_ID) ~ "LM",
+                                               grepl("Men",.obj_seurat$Pat_ID) ~ "LM",
+                                               grepl("fCP",.obj_seurat$Pat_ID) ~ "frontal_brain_CP",
+                                               grepl("hCP",.obj_seurat$Pat_ID) ~ "hindbrain_CP",
+                                               T ~ "PC")
+          
+          ## exclude doublets
+          sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+          sce <- scDblFinder(sce)
+          .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+          
+          .obj_seurat
+      }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    })
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+## remove empty samples
+lst_clplx <- map(1:6, function(x) {
+  unlist(lst_clplx[[x]])
+})
+
+lst_no_cl <- map(fls[c(1:3)], function(x) {
+  tryCatch({
+    .obj <- Read10X_h5(file.path("data","counts_nucseq_fetal_adult",x,"outs","filtered_feature_bc_matrix.h5"))
+    .obj_seurat <- CreateSeuratObject(.obj) %>% 
+      AddMetaData(x, "Pat_ID") %>% 
+      AddMetaData(x, "sample") %>% 
+      AddMetaData(ifelse(x=="adult-control-mixed","adult_no_multiplexing","fetal_no_multiplexing"), "experiment") %>% 
+      AddMetaData(factor(ifelse(x=="mixed-control", "postnatal", gsub(".*_","",.$Pat_ID)), levels = c("CS21","CS23","9pcw","11pcw","12pcw","13pcw","14pcw","15pcw","17pcw","19pcw","20pcw","23pcw","postnatal")), "timepoint") %>% 
+      AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+      subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+    
+    .obj_seurat$compartment <- case_when(grepl("Par",.obj_seurat$sample) ~ "PC",
+                                         grepl("LM",.obj_seurat$sample) ~ "LM",
+                                         grepl("Men",.obj_seurat$sample) ~ "LM",
+                                         grepl("fCP",.obj_seurat$Pat_ID) ~ "frontal_brain_CP",
+                                         grepl("hCP",.obj_seurat$Pat_ID) ~ "hindbrain_CP",
+                                         T ~ "PC")
+    
+    ## exclude doublets
+    sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+    sce <- scDblFinder(sce)
+    .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+    
+    .obj_seurat
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+lst_clplx_lm <- map(fls[4:5], function(x) {
+  tryCatch({
+    fls3 <- list.files(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs"))
+    
+    map(grep("LM$",fls3,value = T), function(i) {
+      tryCatch({
+        .obj <- Read10X_h5(file.path("data","counts_nucseq_fetal_adult",x, "outs","per_sample_outs",i,"count","sample_filtered_feature_bc_matrix.h5"))
+        .obj_seurat <- CreateSeuratObject(.obj$`Gene Expression`) %>% 
+          AddMetaData(i, "Pat_ID") %>% 
+          AddMetaData(x, "sample") %>% 
+          AddMetaData(ifelse(x=="LM_GB","adult_with_multiplexing_1","adult_with_multiplexing_2"), "experiment") %>% 
+          AddMetaData(factor("postnatal", levels = c("CS21","CS23","9pcw","11pcw","12pcw","13pcw","14pcw","15pcw","17pcw","19pcw","20pcw","23pcw","postnatal")), "timepoint") %>% 
+          AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+          subset(subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 20)
+        
+        .obj_seurat$compartment <- case_when(grepl("Par",.obj_seurat$sample) ~ "PC",
+                                             grepl("LM",.obj_seurat$sample) ~ "LM",
+                                             grepl("Men",.obj_seurat$sample) ~ "LM",
+                                             grepl("fCP",.obj_seurat$sample) ~ "frontal_brain_CP",
+                                             grepl("hCP",.obj_seurat$sample) ~ "hindbrain_CP",
+                                             T ~ "PC")
+        
+        ## exclude doublets
+        sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+        sce <- scDblFinder(sce)
+        .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+        
+        .obj_seurat
+      }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+    })
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+## remove empty samples
+lst_clplx_lm <- map(1:2, function(x) {
+  unlist(lst_clplx_lm[[x]])
+})
+
+## merge lists
+lst2 <- map(lst_clplx, Merge_Seurat_List)
+lst3 <- map(lst_clplx_lm, Merge_Seurat_List)
+
+lst_all <- c(lst2, lst_no_cl, lst3)
+all <- Merge_Seurat_List(lst_all, add.cell.ids = as.character(1:11))
+
+all <- all %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures(nfeatures=10000) %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+all <- RunHarmony(all, group.by.vars = "experiment")
+all <- RunUMAP(all, reduction = "harmony", dims = 1:30)
+all <- FindNeighbors(all, reduction = "harmony", dims = 1:30) %>% FindClusters()
+
+## reference mapping of the celltypes
+load(file.path("data","counts_Linnarsson_data_subset_for_azimuth.RData"))
+load(file.path("data","metadata_Linnarsson_data_subset_for_azimuth.RData"))
+
+reference <- counts_sample[which(rownames(counts_sample) %in% rownames(all)),] %>% 
+  CreateSeuratObject() %>% 
+  AddMetaData(df_sample) %>% 
+  NormalizeData() %>% 
+  FindVariableFeatures(nfeatures=10000) %>% 
+  ScaleData() %>% 
+  RunPCA() %>% 
+  RunUMAP(dims = 1:30)
+
+## map data  
+fetal.anchors <- FindTransferAnchors(reference = reference, query = all,
+                                        dims = 1:30, reference.reduction = "pca")
+predictions <- TransferData(anchorset = fetal.anchors, refdata = reference$celltype,
+                            dims = 1:30)
+all <- AddMetaData(all, metadata = predictions)
+
+## load reference for the CP data
+ cp_reference <- readRDS(file.path("data","COVID-19_brain_snRNA-seq_choroid_plexus_final_seurat_v3.2.3.rds")) ## downloaded from url: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE159812 and placed in the data folder
+
+## generate the subset of this data
+cp_reference <- subset(cp_reference, subset = Biogroup == "Control" & Disease == "Non-viral")
+
+## map cp data  
+cp.anchors <- FindTransferAnchors(reference = cp_reference, query = all,
+                                  dims = 1:30, reference.reduction = "pca")
+cp_predictions <- TransferData(anchorset = cp.anchors, refdata = cp_reference$cellID2,
+                               dims = 1:30)
+colnames(cp_predictions) <- paste0("CP_",colnames(cp_predictions))
+all <- AddMetaData(all, metadata = cp_predictions)
+
+## save object
+SaveH5Seurat(all, filename = file.path("data","harmony_integrated_nucseq_all_cells.H5Seurat"))
+} else {
+  all <- LoadH5Seurat(file.path("data","harmony_integrated_nucseq_all_cells.H5Seurat"))
+}
+
+## generate cell type references for the spatial data below
+## add gene modules
+homing_markers <- list("general_homing"=c("CREM","RGS2","SLA","NFE2L2"),
+                       "lymphocyte_homing"=c("CD69","RGS1","LMNA","RGCC","DUSP6","SOCS1"),
+                       "myeloid_homing"=c("AREG","THBD","MPHOSPH6","PLAUR","HBEGF","MERTNL","GNAI3","IL1B","BRE-AS1"),
+                       "monocytes"=c('CCR2', 'CLEC12A', 'PLAC8', 'FCN1', 'S100A9'),
+                       "macrophages"=c("MRC1", "MS4A7", "CD163", "LYVE1", "STAB1","SIGLEC1","MSR1"),
+                       "microglia"= c('P2RY12','TMEM119','SLC2A5',"TREM2","TYROBP","CSF1R","CX3CR1"),
+                       "tcell"=c('TRAC', 'TRBC2', 'CD52', 'IL32'),
+                       "nk"=c("NKG7","KLRB1","PRF1","GZMB","GZMA"),
+                       "myeloid"=c('ITGAM',  'MS4A6A', 'TYROBP', 'CD14'),
+                       "oligodendrocyte"=c('MBP',  'MOG', 'MAG', 'PLP1'),
+                       "bcells"=c('CD79A', 'IGHG4', 'IGLL5'),
+                       "apc"=c("CD74", "CD80", "CD86", "HLA-DRA", "CD40"),
+                       "pDC"=c("IL3RA","LILRA4","TCF4","SELL","LTB"),
+                       "cDC1"=c("XCR1", "CLEC9A","CADM1", "IRF8","BATF3"),
+                       "cDC2"=c("FCER1A", "CLEC10A", "CD1C","CST7","CCR6"),
+                       "migDCs"= c("CCR7", "LAMP3", "SAMSN1"),
+                       "endothelial_Cells"=c("HSPG2","PLVAP","FLT1","VWF","CD34","CLDN5"),
+                       "astrocyte"=c("GFAP", "HEPACAM","SOX9","AQP4","ADGRV1","SLC4A4"),
+                       "mural cells"=c("MYH11","ACTA2","SLC38A11","EBF1","MYO1B"),
+                       "neuron"=c("GAD1","RBFOX3","MYT1L","SNTG1","OPCML","MEG3"),
+                       "fibroblast"=c("IL1R1","RNF220","COL12A1","COL18A1","LINC01088")
+)
+
+## correct timepoint
+timepoint <- case_when(all$timepoint =="NA" ~ "postnatal",
+                       T~all$timepoint)
+names(timepoint) <- colnames(all)
+all$timepoint <- timepoint
+
+## adjust the compartment names
+compartment_cor <- case_when(grepl("CP",all$compartment) ~ "CP",
+                             grepl("13800",all$Pat_ID) ~ "LM",
+                             T~all$compartment)
+names(compartment_cor) <- colnames(all)
+all$compartment_cor <- factor(compartment_cor, levels = c("CP","PC","LM"))
+
+if (!file.exists(file.path("data","adult_lm_nucseq.H5Seurat"))) {
+  ## subset for adult and LM
+  adult_lm <- subset(all, subset= timepoint=="postnatal" & compartment_cor == "LM")
+  
+  ## set the module scores
+  homing_scores <- ScoreSignatures_UCell(adult_lm[["RNA"]]@counts, features=homing_markers)
+  adult_lm <- AddMetaData(adult_lm, as.data.frame(homing_scores))
+  
+  celltypes <- case_when(adult_lm$oligodendrocyte_UCell > .5 ~ "other",
+                         adult_lm$astrocyte_UCell > .4 ~ "other",
+                         adult_lm$neuron_UCell > .5 ~ "other",
+                         adult_lm$microglia_UCell > .5 ~ "other",
+                         adult_lm$macrophages_UCell > .35 & adult_lm$seurat_clusters %in% c("9","22") ~ "CAMs",
+                         adult_lm$fibroblast_UCell > .5 & adult_lm$seurat_clusters %in% c("1","11","16") & adult_lm[["RNA"]]@counts["SOX2",] < 1 ~ "Fibroblast",
+                         adult_lm$endothelial_Cells_UCell > .3 & adult_lm$seurat_clusters == "25" ~ "Endothelial cells",
+                         adult_lm$mural.cells_UCell > .4 & adult_lm$seurat_clusters == "30" ~ "Mural cells",
+                         adult_lm$tcell_UCell > .3 & adult_lm$seurat_clusters == "26" ~ "Lymphocytes",
+                         T ~ "other")
+  
+  names(celltypes) <- colnames(adult_lm)
+  adult_lm$celltype_cor <- celltypes
+  adult_lm <- adult_lm[,!adult_lm$celltype_cor %in% c("other")]
+  
+  SaveH5Seurat(adult_lm, file.path("data","adult_lm_nucseq.H5Seurat")) 
+  } else {
+  adult_lm <- LoadH5Seurat(file.path("data","adult_lm_nucseq.H5Seurat"))
+}
+
+if (!file.exists(file.path("data","adult_pc_nucseq.H5Seurat"))) {
+  adult_pc <- subset(all, subset= timepoint=="postnatal" & compartment_cor == "PC")
+  
+  ## set the module scores
+  homing_scores <- ScoreSignatures_UCell(adult_pc[["RNA"]]@counts, features=homing_markers)
+  adult_pc <- AddMetaData(adult_pc, as.data.frame(homing_scores))
+  
+  celltypes <- case_when(adult_pc$oligodendrocyte_UCell > .5 & adult_pc$seurat_clusters == "6" ~ "Oligo", 
+                         adult_pc$astrocyte_UCell > .5 & adult_pc$seurat_clusters == "17" ~ "Astro",
+                         adult_pc$neuron_UCell > .5 ~ "Neuron",
+                         adult_pc$microglia_UCell > .5 & adult_pc$seurat_clusters %in% c("12","23","22") ~ "MG",
+                         adult_pc$macrophages_UCell > .5 & adult_pc$seurat_clusters == "9" ~ "CAMs",
+                         adult_pc$endothelial_Cells_UCell > .3 & adult_pc$seurat_clusters == "25" ~ "Endothelial cells",
+                         adult_pc$mural.cells_UCell > .5 & adult_pc$seurat_clusters == "30" ~ "Mural cells",
+                         adult_pc$tcell_UCell > .5 & adult_pc$seurat_clusters == "26" ~ "Lymphocytes",
+                         adult_pc$fibroblast_UCell > .5 ~ "Fibroblast",
+                         T ~ "other")
+  
+  names(celltypes) <- colnames(adult_pc)
+  adult_pc$celltype_cor <- celltypes
+  adult_pc <- adult_pc[,!adult_pc$celltype_cor %in% c("other")]
+  
+  SaveH5Seurat(adult_pc, file.path("data","adult_pc_nucseq.H5Seurat")) 
+} else {
+  adult_pc <- LoadH5Seurat(file.path("data","adult_pc_nucseq.H5Seurat")) 
+} 
+
+```
+
+### Run reference mapping and cell type assignment for Figure 3d
+```{r reference mapping, message=FALSE, warning=FALSE}
+
+if (!file.exists(file.path("data","CtrlCtx4_LM_with_segments.RData"))) {## object 8 contains leptomeninges and cortex
+## subset it and create spatial segments
+  coord_df <- read.csv(file.path("data","Out_CtrlCtx4_Scale50_High_Prior_s50_sd50_conf08","b1hi_ctrl_coord_prior08.csv"))
+  colnames(coord_df) <- c("barcodes","x","y")
+  count_mtr  <- read.csv(file.path("data","Out_CtrlCtx4_Scale50_High_Prior_s50_sd50_conf08","segmentation_counts_filt_prior08.csv"),row.names = 1)
+  count_mtr <- count_mtr[, colSums(count_mtr) >= 5]
+  
+  ## subset coord_df for the leptomeninges
+  coord_df_lm <- coord_df[coord_df$y > 7000 & coord_df$y < 15000,]
+  count_mtr_lm <- Matrix(as.matrix(count_mtr[,colnames(count_mtr) %in% coord_df_lm$barcodes]), sparse = T)       
+  barcodes_lm <- colnames(count_mtr_lm)[colnames(count_mtr_lm) %in% coord_df_lm$barcodes]
+  coord_df_lm <- coord_df_lm[coord_df_lm$barcodes %in% barcodes_lm,]
+  
+  obj8_lm <- initiateSpataObject_CountMtr(
+    coords_df = coord_df_lm, # your coordinate data.frame
+    count_mtr = count_mtr_lm, # a matrix with unprocessed count values
+    sample_name = "CtrlCtx4_lm",
+    image = file.path("data","Out_CtrlCtx4_Scale50_High_Prior_s50_sd50_conf08","DAPI_Ctrl Ctx 4_ISAP13586301_20220629.png")
+  )
+  
+  ## the segmentation was hand drawn on the object
+  obj8_lm <- createSegmentation(object = obj8_lm )
+  save(obj8_lm, file = file.path("data","CtrlCtx4_LM_with_segments_img.RData"))
+
+} else {
+  load(file.path("data","CtrlCtx4_LM_with_segments_img.RData"))
+}
+
+if (!file.exists(file.path("data","cartana_ctx4_with_segmentation.RData"))) {
+  df_lm <- obj8_lm@fdata[[1]]
+  ## subset for the LM data
+  df_lm <- df_lm[df_lm$segmentation == "LM",]
+
+  coord_df <- read.csv(file.path("data","Out_CtrlCtx4_Scale50_High_Prior_s50_sd50_conf08","b1hi_ctrl_coord_prior08.csv"))
+  colnames(coord_df) <- c("barcodes","x","y")
+  count_mtr  <- read.csv(file.path("data","Out_CtrlCtx4_Scale50_High_Prior_s50_sd50_conf08","segmentation_counts_filt_prior08.csv"),row.names = 1)
+  count_mtr <- count_mtr[, colSums(count_mtr) >= 5]
+  count_mtr <- Matrix(as.matrix(count_mtr), sparse = T)
+  coord_df <- coord_df[coord_df$barcodes %in% colnames(count_mtr),]
+
+  ctx4 <- initiateSpataObject_CountMtr(
+  coords_df = coord_df, # your coordinate data.frame
+  count_mtr = count_mtr, # a matrix with unprocessed count values
+  sample_name = "Ctx4"
+  )
+
+  ctx4@fdata[[1]]$segmentation <- case_when(ctx4@fdata[[1]]$barcodes %in% df_lm$barcodes ~ "LM",
+                                          T ~ "PC")
+
+  save(ctx4, file = file.path("data","cartana_ctx4_with_segmentation.RData"))
+  } else {
+ load(file.path("data","cartana_ctx4_with_segmentation.RData")) 
+}
+ctx4_spata <- ctx4
+
+if (!file.exists(file.path("data","seurat_ctx4_with_segmentation_celltypes.RData"))) {
+  ctx4 <- ctx4_spata %>% transformSpataToSeurat
+  
+  ## subset for cells with more than 4 features
+  ctx4_lm <- subset(ctx4, subset = segmentation =="LM") %>% 
+    NormalizeData() %>% 
+    ScaleData() %>% 
+    RunPCA()
+  
+  ctx4_pc <- subset(ctx4, subset = segmentation =="PC") %>% 
+    NormalizeData() %>% 
+    ScaleData() %>% 
+    RunPCA()
+  
+  ## load lm reference
+  reference_lm <- adult_lm
+  reference_lm <- reference_lm[rownames(ctx4),]
+  reference_lm <- reference_lm[,colSums(reference_lm[["RNA"]]@counts)>10]
+  VariableFeatures(reference_lm) <- rownames(reference_lm)
+  reference_lm <- reference_lm %>% 
+    NormalizeData() %>% 
+    ScaleData() %>% 
+    RunPCA()
+  
+  ## map celltypes
+  anchors_lm <- FindTransferAnchors(reference = reference_lm , query = ctx4_lm,
+                                            dims = 1:10, reference.reduction = "pca")
+  predictions_lm <- TransferData(anchorset = anchors_lm, refdata = reference_lm$celltype_cor,
+                                dims = 1:10, k.weight = 20)
+  
+  ## load pc reference
+  reference_pc <- adult_pc
+  reference_pc <- reference_pc[rownames(ctx4),]
+  reference_pc <- reference_pc[,colSums(reference_pc[["RNA"]]@counts)>10]
+  VariableFeatures(reference_pc) <- rownames(reference_pc)
+  reference_pc <- reference_pc %>% 
+    NormalizeData() %>% 
+    ScaleData() %>% 
+    RunPCA()
+  
+  ## map celltypes
+  anchors_pc <- FindTransferAnchors(reference = reference_pc , query = ctx4_pc,
+                                    dims = 1:10, reference.reduction = "pca")
+  predictions_pc <- TransferData(anchorset = anchors_pc, refdata = reference_pc$celltype_cor,
+                              dims = 1:10, k.weight = 20)
+  
+  predictions <- bind_rows(predictions_lm,predictions_pc)[colnames(ctx4),]
+  assertthat::are_equal(rownames(predictions),colnames(ctx4))
+  
+  ctx4 <- AddMetaData(ctx4,predictions)
+  save(predictions, file = file.path("data","predictions_ctx4.RData"))
+  save(ctx4, file = file.path("data","seurat_ctx4_with_segmentation_celltypes.RData"))
+  write.csv(predictions, file.path("data","predictions_ctx4.csv"))
+} else {
+  load(file.path("data","seurat_ctx4_with_segmentation_celltypes.RData"))
+  load(file.path("data","predictions_ctx4.RData"))
+}
+```
+
+### Plot Figure 3d 
+```{r figure 3d, message=FALSE, warning=FALSE}
+## xy plot
+    coord2 <- ctx4_spata@coordinates[[1]]
+    coord2 <- coord2[coord2$barcodes %in% colnames(ctx4),]
+    
+    coord2$segmentation <- ctx4$segmentation
+    coord2$celltype <- ctx4$predicted.id
+    coord2 %>% 
+      ggplot(aes(x,y,color=celltype,label="2000 px")) +
+      geom_point(pch=20, size=.005) +
+      scale_color_tq() +
+      theme_void() +
+      coord_fixed() +
+      geom_segment(aes(x = max(x)-2100, y = min(y)+100, xend = max(x)-100, yend = min(y)+100), size=1, color="black") +
+      geom_text(aes(max(x)-1100, y = min(y)+800))
+
+## bar plot
+    celltypes_plt <- data.frame(Cell=ctx4$predicted.id, segmentation=ctx4$segmentation) %>% 
+            group_by(segmentation, Cell) %>% 
+            summarise(cell_count=n()) %>% 
+            group_by(segmentation, .drop = F) %>% 
+            mutate(total_cells = sum(cell_count),
+                   cell_pct=round(cell_count/total_cells*100,2),
+                   label=paste0(Cell," (",cell_pct,"%)"),
+                   Cell_ordered=reorder(Cell, cell_pct),
+                   seg_total=paste0(segmentation, "\n(n=",total_cells,")")) 
+    
+    cell_colors <- unname(palette_light())
+    names(cell_colors) <- sort(unique(celltypes_plt$Cell))
+          
+
+    celltypes_plt %>% 
+      ggplot(aes(x=seg_total, y=cell_pct, fill=Cell_ordered, label = label)) +
+      geom_col(position = "stack", width = .5,alpha=.8, color="black",lwd =.1) +
+      scale_y_continuous(breaks = c(0,50,100)) +
+      #scale_fill_tq(guide_none()) +
+      scale_fill_manual(values = cell_colors[levels(celltypes_plt$Cell_ordered)]) +
+      geom_text_repel(position = position_stack_and_nudge(vjust=.5,y=3), max.overlaps = 30) +
+      theme_minimal() +
+      theme(panel.grid.major.y = element_blank(),
+            panel.grid.minor = element_blank(),
+            text = element_text(size=15)) +
+      coord_flip() +
+      labs(y="Cell percentage [%]",x=element_blank())
+      
+```
+
+```{r source data F3d, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 2e
+write.csv(coord2, file.path("data","source_data","panel_F3d_dotplot.csv"))
+write.csv( celltypes_plt, file.path("data","source_data","panel_F3d_barplot.csv"))
+```
+
+### The code for figures 3e-f is found in the associated Jupyter notebook
+```{r Figure 3g, message=FALSE, warning=FALSE}
+load(file.path("data","nanostring_control.RData"))
+
+## map celltypes
+
+if (!file.exists(file.path("data","nanostring_control_SPATA2.RData"))) {
+  coord <- GetTissueCoordinates(ctx)
+  colnames(coord)[3] <- "barcodes"
+  count_mtr <- ctx[["Nanostring"]]@counts
+  
+  ctx_spata <- initiateSpataObject_CountMtr(
+    coords_df = coord, # your coordinate data.frame
+    count_mtr = counts_mtr, # a matrix with unprocessed count values
+    sample_name = "ControlBA17.1.10"
+  )
+  
+  ctx_spata <- createSegmentation(object = ctx_spata)
+  
+  meta <- ctx_spata@fdata[[1]]
+  save(meta, file = file.path("data","nanostring_control_metadata_with_segmentation.RData"))
+  save(ctx_spata, file = file.path("data","nanostring_control_SPATA2.RData"))
+} else {
+    load(file.path("data","nanostring_control_SPATA2.RData"))
+    load(file.path("data","nanostring_control_metadata_with_segmentation.RData"))
+}
+
+identical(meta$barcodes,colnames(ctx))
+
+## add segmentation
+meta$segmentation <- case_when(meta$segmentation == "LM" ~ "LM",
+                               T ~ "PC")
+ctx$compartment <- meta$segmentation
+
+## classify cells
+if (!file.exists(file.path("data","nanostring_control_celltype_predictions.RData"))) {
+  ## load lm reference
+  reference_lm <- LoadH5Seurat(file.path("data","adult_lm_nucseq.H5Seurat"))
+  reference_lm <- reference_lm[rownames(ctx),]
+  reference_lm <- reference_lm[,colSums(reference_lm[["RNA"]]@counts)>10]
+  VariableFeatures(reference_lm) <- rownames(reference_lm)
+  reference_lm <- reference_lm %>% 
+    SCTransform() %>% 
+    RunPCA()
+  
+  ## map celltypes
+  ctx_lm <- subset(ctx[rownames(reference_lm),], subset = compartment == "LM") %>% 
+    RunPCA()
+  
+  anchors_lm <- FindTransferAnchors(reference = reference_lm , query = ctx_lm,
+                                    dims = 1:30, reference.reduction = "pca")
+  predictions_lm <- TransferData(anchorset = anchors_lm, refdata = reference_lm$celltype_cor,
+                                 dims = 1:30, k.weight = 20)
+  
+  ## load pc reference
+  reference_pc <- LoadH5Seurat(file.path("data","adult_pc_nucseq.H5Seurat"))
+  reference_pc <- reference_pc[rownames(ctx),]
+  reference_pc <- reference_pc[,colSums(reference_pc[["RNA"]]@counts)>10]
+  VariableFeatures(reference_pc) <- rownames(reference_pc)
+  reference_pc <- reference_pc %>% 
+    SCTransform() %>% 
+    RunPCA()
+  
+  ## map celltypes
+  ctx_pc <- subset(ctx[rownames(reference_pc),], subset = compartment == "PC") %>% 
+    RunPCA()
+  
+  anchors_pc <- FindTransferAnchors(reference = reference_pc , query = ctx_pc,
+                                    dims = 1:30, reference.reduction = "pca")
+  predictions_pc <- TransferData(anchorset = anchors_pc, refdata = reference_pc$celltype_cor,
+                                 dims = 1:30, k.weight = 20)
+  
+  predictions <- bind_rows(predictions_lm,predictions_pc)[colnames(ctx),]
+  assertthat::are_equal(rownames(predictions),colnames(ctx))
+  
+  save(predictions, file = file.path("data","nanostring_control_celltype_predictions.RData"))
+} else {
+  load(file.path("data","nanostring_control_celltype_predictions.RData"))
+}
+
+## add metadata 
+ctx <- AddMetaData(ctx,predictions)
+
+## plot
+cell_cols <- unname(palette_light())
+names(cell_cols) <- c("Astro","CAMs","Endothelial cells","Fibroblast","Lymphocytes","MG","Mural cells","Neuron","Oligo")
+ImageDimPlot(ctx, boundaries = "segmentation",group.by = "predicted.id", coord.fixed = T, size = 10) +
+  scale_fill_manual(values = cell_cols[unique(ctx$predicted.id)])
+
+
+```
+```{r source data F3g, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 3g
+fig3g <- data.frame(GetTissueCoordinates(ctx),
+           "Celltype"=ctx@meta.data$predicted.id)
+write.csv(fig3g, file.path("data","source_data","panel_F3g.csv"))
+```
+
+### Figure 3h
+```{r Figure 3h, message=FALSE, warning=FALSE}
+coords <- data.frame(GetTissueCoordinates(ctx),
+           row.names="cell")
+
+ctx <- AddMetaData(ctx, coords)
+ctx_niches <- SeuratWrappers::RunALRA(ctx)
+
+NICHES_ctx <- RunNICHES(object = ctx_niches,
+                              LR.database = "fantom5",
+                              species = "human",
+                              assay = "alra",
+                              position.x = "x",
+                              position.y = "y",
+                              k = 4, 
+                              cell_types = "predicted.id",
+                              min.cells.per.ident = 0,
+                              min.cells.per.gene = NULL,
+                              meta.data.to.map = c('orig.ident','seurat_clusters'),
+                              CellToCell = T,CellToSystem = F,SystemToCell = F,
+                              CellToCellSpatial = F,CellToNeighborhood = T,NeighborhoodToCell = T)
+
+niche <- NICHES_ctx[['NeighborhoodToCell']]
+Idents(niche) <- niche[['ReceivingType']]
+
+# Scale and visualize
+niche <- ScaleData(niche)
+niche <- FindVariableFeatures(niche,selection.method = "disp")
+niche <- RunPCA(niche)
+niche <- RunUMAP(niche,dims = 1:10)
+
+# Find markers
+mark <- FindAllMarkers(niche) #,test.use = "roc",logfc.threshold = 0.2
+GOI_niche <- mark %>% group_by(cluster) %>% filter(avg_log2FC>0) %>% top_n(5,avg_log2FC)
+
+plt <- DotPlot(niche,features = unique(GOI_niche$gene)) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1))
+plt
+```
+```{r source data F3h, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(plt$data, file.path("data","source_data","panel_F3h.csv"))
+```
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

@@ -1,0 +1,258 @@
+---
+title: "Seurat workflow for Figure 2"
+output: html_notebook
+---
+
+### Load the seurat packages
+```{r Load packages, warning=FALSE, message=FALSE}
+library(SingleCellExperiment)
+library(scuttle)
+library(scDblFinder)
+library(Seurat)
+library(SeuratDisk)
+library(tidyverse)
+library(assertthat)
+library(cowplot)
+library(scCustomize)
+library(UCell)
+```
+### Load counts data and remove doublets
+```{r Load count files, , warning=FALSE, message=FALSE}
+# Load data
+## dataset 1
+fls1 <- list.dirs(file.path("data","CelSeq_data"))
+fls1 <- grep("/Gene/filtered",fls1, value = T)
+
+obj <- map(fls1, function(x) {
+  tryCatch({
+    .id <- gsub("(data/CelSeq_data/|Solo.out/Gene/filtered)", "", x)
+    .obj <- ReadSTARsolo(x)
+    colnames(.obj) <- paste(.id, colnames(.obj),sep = "_")
+    .obj_seurat <- CreateSeuratObject(.obj) %>% 
+      AddMetaData(.id, "sample") %>% 
+      AddMetaData(case_when(grepl("(FR645_DM|PVM_7)", x) ~ "A",
+                            grepl("(FR982_Men|FR960_DM)", x) ~ "B",
+                            grepl("(FR685|FR541|FR845|FR648)", x) ~ "C",
+                            grepl("(FR818|FR449|FR793|FR882|FR411|FR751)", x) ~ "D",
+                            grepl("(FR240|FR742)", x) ~ "E",
+                            grepl("(FR999|FR631_FR580|FR327|FR387|FR645)", x) ~ "F",
+                            grepl("(CP_5|FR580|FR219)", x) ~ "G",
+                            T ~ NA), 
+                  "batch") %>% 
+      AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") 
+    
+    .obj_seurat$compartment <- case_when(grepl("DM",.obj_seurat$sample) ~ "DM",
+                                         grepl("LM",.obj_seurat$sample) ~ "LM",
+                                         grepl("Men",.obj_seurat$sample) ~ "LM",
+                                         grepl("CP",.obj_seurat$sample) ~ "CP",
+                                         T ~ "CTX")
+    .obj_seurat$diagnosis <- case_when(grepl("GB", .obj_seurat$sample)~ "GB",
+                                       T~ "Ctrl")
+    
+    ## exclude doublets
+    sce <- SingleCellExperiment(assays=list(counts=.obj_seurat@assays$RNA@counts))
+    sce <- scDblFinder(sce)
+    .obj_seurat <- .obj_seurat[,sce@colData$scDblFinder.class == "singlet"]
+    
+    .obj_seurat
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+## merge and filter object
+obj_filt <- Merge_Seurat_List(obj) %>% 
+  subset(subset = nFeature_RNA >= 200 & nFeature_RNA < 4000 & percent.mt < 20)
+
+## split object by batch
+obj_list <- SplitObject(obj_filt, split.by = "batch")
+
+## normalized the data  
+all <- map(obj_list, function(x) SCTransform(x,variable.features.n = 5000))
+```
+### Run reference mapping based on the blood monocyte derived cells from Hao el al, Cell 2021 
+```{r Reference mapping, message=FALSE, warning=FALSE}
+## load reference
+## from url: https://satijalab.org/seurat/articles/multimodal_reference_mapping.html
+reference <- LoadH5Seurat(file.path("data","pbmc_multimodal.h5seurat"))
+DimPlot(object = reference, reduction = "wnn.umap", group.by = "celltype.l2", label = TRUE, label.size = 3, repel = TRUE) + NoLegend()
+
+## Computing a cached neighbor index
+reference <- FindNeighbors(
+  object = reference,
+  reduction = "spca",
+  dims = 1:50,
+  graph.name = "spca.annoy.neighbors", 
+  k.param = 50,
+  cache.index = TRUE,
+  return.neighbor = TRUE,
+  l2.norm = TRUE
+)
+
+## mapping
+  anchors <- map(all, function(x) {
+  FindTransferAnchors(
+    reference = reference,
+    query = x,
+    k.filter = NA,
+    reference.reduction = "spca", 
+    reference.neighbors = "spca.annoy.neighbors", 
+    dims = 1:50)
+})
+
+## i have to split mapquery because the last dataset does not work with k.weight of 50
+all2 <- map(1:length(all), function(x) {
+  tryCatch({
+    .obj <- all[[x]]
+    .obj <- TransferData(
+      anchorset = anchors[[x]], 
+      reference = reference,
+      query = .obj,
+      k.weight = 42,
+      refdata = list(
+        celltype = "celltype.l2", 
+        celltype2 = "celltype.l1", 
+        celltype3 = "celltype.l3", 
+        predicted_ADT = "ADT")
+    )
+    .obj <- IntegrateEmbeddings(
+      anchorset = anchors[[x]],
+      reference = reference,
+      query = .obj, 
+      new.reduction.name = "ref.spca"
+    )
+    .obj <- ProjectUMAP(
+      query = .obj, 
+      query.reduction = "ref.spca", 
+      reference = reference, 
+      reference.reduction = "spca", 
+      reduction.model = "wnn.umap"
+    )
+    
+    .obj
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+})
+
+## merge datasets and generate new UMAP
+#merge reference and query
+refquery <- Merge_Seurat_List(all2[!unlist(map(all2, is.null))])
+.df <- data.frame
+spca_list <- map(all2[!unlist(map(all2, is.null))], function(x) {
+  x[["ref.spca"]]
+})
+spca <- merge(spca_list[[1]], y=spca_list[2:length(spca_list)])
+  
+refquery[["spca"]] <- spca
+refquery_merge <- refquery %>% 
+  RunUMAP(reduction = 'spca', dims = 1:50) %>% 
+  FindNeighbors(reduction = 'spca', dims = 1:50) %>% 
+  FindClusters(resolution = 1)
+
+## prepare for find markers
+refquery_merge <- PrepSCTFindMarkers(refquery_merge)
+```
+
+### Add metadata and save the object
+```{r Add metadata, message=FALSE, warning=FALSE}
+## add gene modules
+homing_markers <- list("general_homing"=c("CREM","RGS2","SLA","NFE2L2"),
+                       "lymphocyte_homing"=c("CD69","RGS1","LMNA","RGCC","DUSP6","SOCS1"),
+                       "myeloid_homing"=c("AREG","THBD","MPHOSPH6","PLAUR","HBEGF","MERTNL","GNAI3","IL1B","BRE-AS1"),
+                       "monocytes"=c('CCR2', 'CLEC12A', 'PLAC8', 'FCN1', 'S100A9'),
+                       "macrophages"=c("MRC1", "MS4A7", "CD163", "LYVE1", "STAB1"),
+                       "microglia"= c('P2RY12','TMEM119', 'SLC2A5'),
+                       "tcell"=c('TRAC', 'TRBC2', 'CD52', 'IL32'),
+                       "nk"=c("NKG7","KLRB1","PRF1","GZMB","GZMA"),
+                       "myeloid"=c('ITGAM',  'MS4A6A', 'TYROBP', 'CD14'),
+                       "oligodendrocyte"=c('MBP',  'MOG', 'MAG', 'PLP1'),
+                       #"bcells"=c('CD79A', 'IGHG4', 'IGLL5'),
+                       "apc"=c("CD74", "CD80", "CD86", "HLA-DRA", "CD40"),
+                       "pDC"=c("IL3RA","LILRA4","TCF4","SELL","LTB"),
+                       "cDC1"=c("XCR1", "CLEC9A","CADM1", "IRF8","BATF3"),
+                       "cDC2"=c("FCER1A", "CLEC10A", "CD1C","CST7","CCR6"),
+                       "MigDCs"= c("CCR7", "LAMP3", "SAMSN1"),
+                       "Endothelial_Cells"=c("HSPG2","PLVAP","FLT1","VWF","CD34"),
+                       "astrocyte"=c("GFAP", "HEPACAM","SOX9","AQP4")
+)
+
+## set the module scores
+refquery_merge <- AddModuleScore(refquery_merge, homing_markers, name = names(homing_markers))
+homing_scores <- ScoreSignatures_UCell(refquery_merge[["SCT"]]@counts, features=homing_markers)
+refquery_merge <- AddMetaData(refquery_merge, as.data.frame(homing_scores))
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+refquery_merge <- CellCycleScoring(refquery_merge, s.features = s.genes, g2m.features = g2m.genes)
+
+## save data
+SaveH5Seurat(refquery_merge, file= file.path("data","reference_mapped_celseq2_all_cd206_gate_.H5Seurat"))
+```
+
+### Add index sorting data and re-run Seurat for the Control samples only - Plate-based single-cell data contains index information of the parameters measured during acquisition
+```{r Add index sorting data, message=FALSE, warning=FALSE}
+load(file.path("data","index_all_ctrl.RData"))
+
+## subset the index data for the cells contained in the seurat object only
+ind_data <- index_all[colnames(refquery_merge),]
+rownames(ind_data) <- colnames(refquery_merge)
+colnames(ind_data)[30:33] <- tolower(colnames(ind_data[30:33]))
+
+## add 
+refquery_merge[["index"]] <- CreateAssayObject(t(ind_data[,c(21:22,25:29)]))
+refquery_merge <- refquery_merge %>% 
+  AddMetaData(ind_data[,30:33])
+
+## run seurat on control samples
+ctrl <- subset(refquery_merge, subset = diagnosis_ind == "Ctrl")
+
+ctrl <- ctrl %>% 
+  RunUMAP(reduction = 'spca', dims = 1:50) %>% 
+  FindNeighbors(reduction = 'spca', dims = 1:50) %>% 
+  FindClusters(resolution = .3)
+
+## center and normalize index data
+DefaultAssay(ctrl) <- "index"
+VariableFeatures(ctrl) <- rownames(ctrl[["index"]])
+
+ctrl <- ctrl %>% 
+  NormalizeData(normalization.method = 'CLR', margin = 2) %>% 
+  ScaleData() %>% 
+  RunPCA(reduction.name = 'ipca') 
+
+## center and normalize ADT data
+DefaultAssay(ctrl) <- "predicted_ADT"
+VariableFeatures(ctrl) <- rownames(ctrl[["predicted_ADT"]])
+
+## set default assay back to SCT
+DefaultAssay(ctrl) <- "SCT"
+```
+
+### Generate a Seurat object that does not include low quality cells from cluster 2
+```{r remove low quality cells and rerun seurat, message=FALSE, warning=FALSE}
+## run seurat on control samples
+ctrl <- subset(ctrl, idents = c("0","1","3","4"))
+
+ctrl <- ctrl %>% 
+  RunUMAP(reduction = 'spca', dims = 1:50) %>% 
+  FindNeighbors(reduction = 'spca', dims = 1:50) %>% 
+  FindClusters(resolution = .3)
+
+## center and normalize index data
+DefaultAssay(ctrl) <- "index"
+VariableFeatures(ctrl) <- rownames(ctrl[["index"]])
+
+ctrl <- ctrl %>% 
+  NormalizeData(normalization.method = 'CLR', margin = 2) %>% 
+  ScaleData() %>% 
+  RunPCA(reduction.name = 'ipca') 
+
+## center and normalize ADT data
+DefaultAssay(ctrl) <- "predicted_ADT"
+VariableFeatures(ctrl) <- rownames(ctrl[["predicted_ADT"]])
+
+DefaultAssay(ctrl) <- "SCT"
+
+## save object
+SaveH5Seurat(ctrl, file.path("data","reference_mapped_celseq2_ctrl_cd206_gate_no_lowq_cells.H5Seurat"))
+```
+

@@ -1,0 +1,479 @@
+---
+title: "Figure-5-code"
+output: html_notebook
+---
+
+```{r Load packages, warning=FALSE, message=FALSE}
+library(readxl)
+library(tidyverse)
+library(tidyquant)
+library(ggpubr)
+library(ggbeeswarm)
+library(broom)
+library(emmeans)
+library(rstatix)
+library(RaceID)
+library(FateID)
+library(EnhancedVolcano)
+library(Seurat)
+library(SeuratDisk)
+library(UCell)
+library(viridis)
+library(RColorBrewer)
+```
+### Figure 5c
+```{r Figure F5c, warning=FALSE,message=FALSE}
+## run RaceID
+load(file.path("data","multimodal_harmony_integrated_controls.RData"))
+all <- refquery_merged
+rm(refquery_merged)
+source(file.path("R","functions.R"))
+
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(all) <- rev(order_clusters)[c(11:15,10:1,31:33,16:30,34:35)] 
+all$seurat_clusters <- factor(all$seurat_clusters, levels = levels(all))
+
+#extract metadata
+metadata <- all@meta.data
+metadata$seurat_clusters <- factor(metadata$seurat_clusters, levels = levels(all))
+
+date <- Sys.Date()
+
+set.seed(79106)
+
+if (!file.exists(file.path("data","sc_ref_map_all.RData"))) {
+  
+  sc <- SCseq(all[["RNA"]]@counts)
+  
+  #filter data
+  sc <- filterdata(sc, 
+                   mintotal=100,
+                   minnumber = 1,
+                   knn=10,
+                   minexpr = 1)
+  
+  # 2.Run Seurat with filtering such that the same cells are retained
+  assert_that(length(colnames(all)) == length(colnames(sc@ndata)))
+  
+  # 3.Re-initialize RaceID output with Seurat data:
+  
+  part <- as.numeric(as.character(all@meta.data$seurat_clusters))
+  d <- as.matrix( dist(all@reductions$spca@cell.embeddings) )
+  tsne <- as.data.frame(all@reductions$umap@cell.embeddings)
+  names(part) <- colnames(sc@ndata)
+  
+  n <- colnames(sc@ndata)
+  part <- part[n]
+  
+  # partition
+  sc@cpart <- sc@cluster$kpart <- part
+  # distances
+  sc@distances <- d[n,n]
+  # tsne
+  sc@tsne <- tsne[n,]
+  rm(d, tsne)
+  
+  sc@medoids <- compmedoids(sc, sc@cpart)
+  
+  #reorder the clusters
+  idx <- which(order_clusters %in% unique(as.character(sc@cpart)))
+  sc@cpart <- factor(sc@cpart, levels = order_clusters)
+  
+  sc@fcol <- c(colors_pat, colors_many, colors_fig)[-2][idx]
+  
+  save(sc, file=file.path("data","sc_ref_map_all.RData"))
+  
+} else {
+  load(file.path("data","sc_ref_map_all.RData"))
+}
+
+
+#StemID
+if (!file.exists(file.path("data","ltr_ref_map_all.RData"))){ #data/ltr-larger-clusters.RData
+  ltr <- Ltree(sc)
+  
+  #convert clusters in integers
+  ltr@sc@cpart <- as.numeric(as.character(ltr@sc@cpart)) +1
+  names(ltr@sc@cpart) <- colnames(ltr@sc@ndata)
+  
+  ltr <- compentropy(ltr)
+  ltr <- projcells(ltr,nmode=TRUE,fr=FALSE) #400
+  ltr <- projback(ltr,pdishuf=100)
+  ltr <- lineagegraph(ltr)
+  ltr <- comppvalue(ltr,pthr=0.2)
+  
+  save(ltr, file = file.path("data","ltr_ref_map_all.RData"))
+} else {
+  load(file.path("data","ltr_ref_map_all.RData"))
+}
+
+x <- compscore(ltr,scthr=0.2)
+plotgraph(ltr,showCells=FALSE)
+
+#lineage tree - note that the numbering starts at 0 therefore the cluster numbers are all +1
+monocytes <- c(8,21)
+
+#pseudotemporal all
+n <- cellsfromtree(ltr,monocytes)
+x <- getfdata(ltr@sc)
+
+fs  <- filterset(x,n=n$f, minexpr = 2, minnumber = 2)
+
+if (!file.exists(file.path("data","s1d-ctrl-monocytes-10x_ref_map_.Robj"))) {
+  s1d <- getsom(fs,nb=1000,alpha=.5)
+  save(s1d, file = file.path("data","s1d-ctrl-monocytes-10x_ref_map_.Robj"))
+} else {
+  load(file.path("data","s1d-ctrl-monocytes-10x_ref_map_.Robj"))
+}
+
+ps  <- procsom(s1d,corthr=.8,minsom=5)
+y    <- ltr@sc@cpart[n$f]
+fcol <- sc@fcol
+plotheatmap(ps$all.z,xpart=y,xcol=fcol,ypart=ps$nodes,xgrid=FALSE,ygrid=TRUE,xlab=FALSE)
+
+## note that the heatmap may be flipped compared to the paper
+```
+```{r source data F5d, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(ps$all.z, file.path("data", "source_data","F5c.csv"))
+```
+
+### Figure 5e
+```{r Figure F5e, warning=FALSE,message=FALSE}
+df <- read_excel(file.path("data","engraftment","table_S1.xlsx")) %>% t
+
+#set and tidy up colnames
+colnames(df) <- gsub(" ", "_",df[1,])
+colnames(df) <- gsub("%", "pct",colnames(df))
+colnames(df) <- gsub("\\[|\\]", "",colnames(df))
+df <- df[-1,]
+
+#set class of columns and change to data.frame
+df <- df %>%
+  apply(MARGIN = 2, as.numeric) %>% 
+  as.data.frame()
+
+#separate region from measurement
+df <- df %>% 
+  pivot_longer(cols = Cortex_density_IBA1:DM_engraftment_IBA1_pct) %>%
+  mutate(Region = gsub("_.*", "", name)) %>%
+  mutate(#Parameter = map_chr(str_split(.$name, "_"), function(x) paste(x[c(2,3)], collapse = "_")),
+    Parameter_short = map_chr(str_split(.$name, "_"), function(x) x[2])) %>%
+  na.omit() %>%
+  dplyr::filter(!grepl("(_CD206|_SIGLEC1)", .$name)) %>%
+  dplyr::select(-c(name)) %>%
+  mutate(row = row_number()) %>%
+  pivot_wider(names_from = Parameter_short, values_from = value) #%>%
+#na.omit()
+
+#filter data
+df2 <- df[df$Region %in% c("Cortex","CP", "LM", "Pv", "DM") ,]
+df2$Region <- as.factor(df2$Region)
+
+levels(df2$Region) <- c("Micr", "CP", "Dura", "LM", "PVM")
+
+df2$Region <- factor(df2$Region, levels=c("Micr", "PVM", "CP", "LM", "Dura"))
+
+#analyze regions separately
+df3 <- split(df2, df2$Region)
+
+mods_slog <- map(df3, function(x) lm(engraftment ~ 0 + log10(Survival_after_allogeneic_PBSCT_d), x)) 
+mods <- map(df3, function(x) lm(engraftment ~ 0 + log10(Survival_after_allogeneic_PBSCT_d), x))
+mods_slog2 <- mods_slog %>% map(augment) %>%
+  bind_rows(.id="Region")
+
+#plot linear fit estimates
+#plot
+mods_slog2$Region <- factor(mods_slog2$Region, levels=c("Micr", "PVM","CP",  "LM", "Dura"))
+
+engr <- ggplot(mods_slog2, aes(x=10^(`log10(Survival_after_allogeneic_PBSCT_d)`), y=engraftment, fill = Region, color=Region)) +
+  geom_point(pch=21, size=4) +
+  scale_x_log10() +
+  geom_line(aes(x=10^(`log10(Survival_after_allogeneic_PBSCT_d)`), y=.fitted)) + 
+  facet_wrap(~Region, ncol = 3) + 
+  theme_bw() +
+  labs(x="Days after PBSCT", "% Engraftment") +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") 
+
+engr
+```
+```{r source data F5e, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(mods_slog2, file.path("data","source_data","panel_F5e.csv"))
+```
+
+
+### Figure 5f
+```{r Figure 5f, warning=FALSE,message=FALSE}
+#t50 plot
+
+#get the estimate summaries
+all_coefs <- mods_slog %>% map(function(x) data.frame(adj_r2 = round(summary(x)$adj.r.squared,2), p = summary(x)$coefficients[,4], 2)) %>%
+  bind_rows(.id="Region")
+
+all_coefs_2 <- mods_slog %>% map(function(x) as.data.frame(summary(x)$coefficients)) %>%
+  bind_rows(.id="Region")
+
+#plot estimates for the time until 50% of cells are Y+
+all_coefs_3 <- all_coefs_2 %>%
+  mutate(t50_mean = 10^(50/Estimate), 
+         t50_mean_lower = 10^(50/(Estimate-1.96*`Std. Error`)),
+         t50_mean_upper = 10^(50/(Estimate+1.96*`Std. Error`)))
+
+all_coefs_3 %>% 
+  ggplot(aes(factor(Region, levels=c("Micr", "PVM","CP",  "LM", "Dura")), t50_mean, label=round(t50_mean,2), fill=factor(Region, levels=c("Micr", "PVM","CP",  "LM", "Dura")), color=factor(Region, levels=c("Micr", "PVM","CP",  "LM", "Dura")))) +
+  geom_pointrange(aes(ymin=t50_mean_upper, ymax=t50_mean_lower), size=1.5) +
+  #scale_y_log10() +
+  geom_text(nudge_x = 0.33, size=5) +
+  expand_limits(y=c(0,600)) +
+  theme_bw() +
+  labs(x=element_blank(), y= "Estimate for T50 (days)") +
+  scale_fill_brewer(guide=F,palette = "Set1") +
+  scale_color_brewer(guide=F,palette = "Set1") +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        text = element_text(size=15)) 
+
+#statistical testing
+mod <- lm(engraftment ~ 0 + log10(Survival_after_allogeneic_PBSCT_d) + factor(Region), df2)
+#summary(mod)
+a <- aov(mod)
+#summary(a)
+em <- emmeans(mod, "Region",
+              adjust="tukey")
+
+pairs(em)
+
+```
+```{r source data F5f, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(as.data.frame(pairs(em)), file.path("data","source_data","stats_F5f.csv"))
+write.csv(all_coefs_3, file.path("data","source_data","panel_F5f.csv"))
+
+```
+
+
+### Figure 5h
+```{r Figure 5h, warning=FALSE,message=FALSE}
+#load data
+df <- read_excel(file.path("data","engraftment","table_S1.xlsx")) %>% 
+  as.data.frame()
+rownames(df) <- df[,1]
+df <- df[,-1]
+colnames(df) <- paste0("Pat_", colnames(df))
+
+#subset for the relevant patients
+df2 <- df[c("LM engraftment IBA1 [%]","LM engraftment CD206 [%]","LM engraftment SIGLEC1 [%]","Pv engraftment IBA1 [%]", "Pv engraftment CD206 [%]", "Pv engraftment SIGLEC1 [%]"),c("Pat_1", "Pat_12","Pat_14")] %>% 
+  rownames_to_column(var="Parameter") %>% 
+  mutate(Antigen=factor(rep(c("IBA1","CD206","SIGLEC1"),2),levels = c("IBA1","CD206","SIGLEC1"))) %>% 
+  pivot_longer(-c(Parameter, Antigen), names_to = "Pat_ID" , values_to = "percent") %>% 
+  mutate(Compartment=case_when(
+    grepl("LM",.$Parameter) ~ "Leptomeninges",
+    T ~ "Perivascular space"
+  ),
+  percent=as.numeric(percent))
+
+#dot plot
+my_comparisons <- list( c("IBA1", "CD206"), c("CD206", "SIGLEC1"), c("IBA1", "SIGLEC1") )
+
+
+df2 %>% 
+  ggplot(aes(Antigen, percent, fill=Antigen)) +
+  geom_jitter(shape=21, size=12, width = .2, height = 0) +
+  stat_summary(fun=mean, geom="crossbar", width=0.7) +
+  facet_wrap(~ Compartment, ncol = 1) +
+  expand_limits(y=c(0,100)) +
+  theme_linedraw() +
+  stat_compare_means(comparisons = my_comparisons, 
+                     method = "t.test",
+                     size=5) +
+  labs(y="% of double positive cells") +
+  theme(panel.grid = element_blank(),
+        legend.position = "None",
+        text = element_text(size = 15)) +
+  scale_fill_brewer(palette = "Pastel2")
+  
+```
+
+```{r source data F5h, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(df2, file.path("data","source_data","panel_F5f.csv")) 
+```
+
+### Figure 5i
+```{r Figure 5i, warning=FALSE,message=FALSE}
+all <- LoadH5Seurat(file.path("data","all_cells_ffpe.H5Seurat"))
+
+celltypes <- read.table(file.path("data","azimuth_ffpe","azimuth_pred.tsv"), sep="\t",header = T,row.names = 1)
+
+all <- all %>% AddMetaData(celltypes)
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["SCT"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(all) <- rev(order_clusters)
+all$seurat_clusters <- factor(all$seurat_clusters, levels = levels(all))
+
+## cluster
+if (!file.exists(file.path("data","micr_ffpe.H5Seurat"))) {
+    ## subset microglia
+    micr <- subset(all, idents = "9") %>% 
+      AddMetaData(PercentageFeatureSet(., pattern = "^MT-"),"percent.mt") %>% 
+      #NormalizeData() %>% 
+      #FindVariableFeatures() %>% 
+      #ScaleData(vars.to.regress = "percent.mt") %>% 
+      SCTransform(vars.to.regress = "percent.mt") %>% 
+      RunPCA() %>% 
+      RunUMAP(dims=1:5) %>% 
+      FindNeighbors(dims=1:5) %>% 
+      FindClusters(resolution = .9)
+    
+    ## add gene module scores
+    homing_markers <- list("general_homing"=c("CREM","RGS2","SLA","NFE2L2"),
+                           "lymphocyte_homing"=c("CD69","RGS1","LMNA","RGCC","DUSP6","SOCS1"),
+                           "myeloid_homing"=c("AREG","THBD","MPHOSPH6","PLAUR","HBEGF","MERTNL","GNAI3","IL1B","BRE-AS1"),
+                           "monocytes"=c('CCR2', 'CLEC12A', 'PLAC8', 'FCN1', 'S100A9'),
+                           "macrophages"=c("MRC1", "MS4A7", "CD163", "LYVE1", "STAB1"),
+                           "microglia"= c('P2RY12','TMEM119', 'SLC2A5'),
+                           "oligodendrocyte"=c('MBP',  'MOG', 'MAG', 'PLP1'),
+                           "apc"=c("CD74", "CD80", "CD86", "HLA-DRA", "CD40")
+    )
+    
+    ## set the module scores
+    micr <- AddModuleScore(micr, homing_markers, name = names(homing_markers), nbin = 5)
+    
+    ## cell cycle scoring
+    s.genes <- cc.genes$s.genes
+    g2m.genes <- cc.genes$g2m.genes
+    micr <- CellCycleScoring(micr, s.features = s.genes, g2m.features = g2m.genes, nbin = 5)
+    
+    ## save
+    SaveH5Seurat(micr, filename = file.path("data","micr_ffpe.H5Seurat"),overwrite = T)
+
+} else {
+  micr <- LoadH5Seurat(file.path("data","micr_ffpe.H5Seurat"))
+}
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= micr$seurat_clusters, row.names = rownames(micr[[]])) %>%
+  bind_cols(as.data.frame(t(micr[["SCT"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(micr) <- order_clusters
+micr$seurat_clusters <- factor(micr$seurat_clusters, levels = levels(micr))
+
+## clusters
+DimPlot(micr, label = T, pt.size = 10) +
+  theme_void() +
+  scale_color_tq() +
+  NoLegend()
+
+```
+```{r source data F5i, echo=FALSE,warning=FALSE,message=FALSE}
+data.frame("UMAP_1" =micr@reductions$umap@cell.embeddings[,1],
+           "UMAP_2" =micr@reductions$umap@cell.embeddings[,2],
+           "Cluster"=micr$seurat_clusters) %>% 
+write.csv( file.path("data","source_data","stats_F5i_top.csv"))
+
+micr[[]] %>%
+  hyper_test_n(var1="seurat_clusters",var2="condition") %>% 
+write.csv(file.path("data","source_data","panel_F5i_stats.csv"))
+
+```
+
+### Figure 5j
+```{r Figure 5j, warning=FALSE,message=FALSE}
+## volcano plots
+c2 <- FindMarkers(micr, 
+                 ident.1 = "0",
+                 ident.2 = "3", 
+                 logfc.threshold = 0.01,
+                 min.pct = 0.01) 
+
+EnhancedVolcano(c2, lab = rownames(c2), 
+                x="avg_log2FC", y="p_val", 
+                FCcutoff = .1,
+                pCutoff = .0001,
+                #labSize = 6, 
+                subtitle = element_blank(), title = "C3 Ctrl (left) vs. C0 Transplanted (right)",
+                caption = element_blank(),
+                parseLabels = T,
+                drawConnectors = T,
+                max.overlaps = 40,
+                colConnectors = "black",
+                arrowheads = F,
+                pointSize = 3,
+                xlim = c(-1,1),
+                ylim = c(0, 8)
+) +
+  theme(panel.grid.minor = element_blank()) 
+```
+```{r source data F5j, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(c2, file.path("data","source_data","panel_F5j.csv"))
+```
+
+### Figure 5l
+```{r Figure 5l, warning=FALSE,message=FALSE}
+df <- read.csv(file.path("data","homeostasis_engraftment_dbl_pos.csv")) %>% 
+  mutate(Protein=factor(Protein, levels=c("Iba1","P2RY12","GLUT5","TMEM119")))
+
+## define comparisons
+my_comparisons <- list( c("Iba1", "TMEM119"), 
+                        c("Iba1", "GLUT5"), 
+                        c("Iba1", "P2RY12"),
+                        c("P2RY12", "TMEM119"), 
+                        c("P2RY12", "GLUT5"))
+
+## stat testing
+# Statistical tests
+stat.test <- df %>% t_test(perc_cbl_pos ~ Protein) 
+stat.test
+  stat.test <- stat.test %>% add_xy_position(fun = "mean_sd", x = "Protein")
+
+## plot
+df %>% 
+  ggplot(aes(Protein, perc_cbl_pos, fill=Protein)) +
+  geom_jitter(shape=21, size=12, width = .2, height = 0) +
+  stat_summary(fun=mean, geom="crossbar", width=0.7) +
+  expand_limits(y=c(0,100)) +
+  theme_linedraw() +
+  #stat_compare_means(comparisons = my_comparisons, method = "t.test", size=7) +
+  #ggpubr::stat_pvalue_manual(stat.test, label = "p.adj",tip.length = 0.01) +
+  labs(y="% of double positive cells\namong Y+ cells") +
+  theme(panel.grid = element_blank(),
+        legend.position = "None",
+        text = element_text(size = 25),
+        axis.text.x = element_text(angle = 45, hjust=1),
+        axis.title.x = element_blank()) +
+  scale_fill_manual(values = brewer.pal(6, "Pastel2")[c(1,4:6)])
+```
+```{r source data F5l, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(df, file.path("data","source_data","panel_F5l.csv"))
+a <- as.data.frame(stat.test) 
+a %>% 
+write_csv( file.path("data","source_data","stats_F5l.csv"))
+```
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

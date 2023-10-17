@@ -1,0 +1,779 @@
+---
+title: "Figure-6-code"
+output: html_notebook
+---
+
+
+```{r Load packages, warning=FALSE, message=FALSE}
+library(UCell)
+library(ggpubr)
+library(Seurat)
+library(SeuratDisk)
+library(tidyverse)
+library(assertthat)
+library(cowplot)
+library(tidyquant)
+library(viridis)
+library(EnhancedVolcano)
+library(MOFA2)
+library(HDF5Array)
+library(ComplexHeatmap)
+library(circlize)
+library(clusterProfiler)
+library(SPATA2)
+library(NICHES)
+library(tidyquant)
+source(file.path("R","functions.R"))
+```
+
+### Figure 6b
+```{r  Figure F6b, warning=FALSE,message=FALSE}
+load(file.path("data","multimodal_harmony_integrated_gb.RData"))
+
+all <- refquery_hm #LoadH5Seurat(file.path("data","multimodal_harmony_integrated_gb.H5Seurat"))
+rm(refquery_hm)
+
+## cell cycle scoring
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Create our Seurat object and complete the initalization steps
+all <- CellCycleScoring(all, s.features = s.genes, g2m.features = g2m.genes)
+cc_scores <- ScoreSignatures_UCell(all[["RNA"]]@counts, features=list(s.features = s.genes, g2m.features = g2m.genes))
+all <- AddMetaData(all, as.data.frame(cc_scores))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+levels(all) <- rev(order_clusters)[c(12,14,13,15:30,11:1)]
+
+## adjust cell types
+celltype_cor <- case_when(
+  all$seurat_clusters %in% c("19","29") ~ "Neuroectodermal",
+  all$seurat_clusters %in% c("17") ~ "CAMs",
+  all$seurat_clusters %in% c("3","7","11","14","16","0","12","1","5") ~ "MG",
+  all$seurat_clusters %in% c("15","25","4") & all$diagnosis == "GB" ~ "moTAMs",
+  all$seurat_clusters %in% c("2") & all$diagnosis == "GB" ~ "mgTAMs",
+  all$seurat_clusters %in% c("8") ~ "Class. Mono",
+  all$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all$predicted.celltype == "CD16 Mono" & all$seurat_clusters == ("23") ~ "Non-Class. Mono",
+  T ~ all$predicted.celltype
+)
+names(celltype_cor) <- colnames(all)
+all$celltype_cor <- celltype_cor
+
+## plot clusters
+DimPlot(all, label = T, pt.size = 1, repel = T) +
+  scale_color_manual(values = c(colors_many, colors,unname(palette_green()))[-c(14,21,28)]) +
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+```
+### Figure 6c - top panel
+```{r Figure F6c top, warning=FALSE,message=FALSE}
+DimPlot(all, group.by = "diagnosis",  label = T) +
+  #scale_color_tq(theme = "dark") +
+  scale_color_manual(values = unname(palette_green())[c(5,7)]) + 
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+```
+
+### Figure 6c - bottom panel
+```{r Figure F6c bottom, warning=FALSE,message=FALSE}
+all[[]] %>% 
+  mutate(seurat_clusters=factor(seurat_clusters, levels=levels(all))) %>% 
+  mosaicGG2(X="seurat_clusters",FILL="diagnosis", colors = unname(palette_green())[c(5,7)])
+
+all[[]] %>% 
+  hyper_test_n(var1="seurat_clusters",var2="diagnosis")
+```
+
+### Figure 6d - top panel
+```{r Figure F6d top, warning=FALSE,message=FALSE}
+DimPlot(all, group.by = "compartment", label = T) +
+  scale_color_manual(values = unname(palette_dark())[c(2,4)]) + 
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+```
+
+
+### Figure 6d - bottom panel
+```{r Figure F6d bottom, warning=FALSE,message=FALSE}
+all[[]] %>% 
+  mutate(seurat_clusters=factor(seurat_clusters, levels=levels(all))) %>% 
+  mosaicGG2(X="seurat_clusters",FILL="compartment", colors = unname(palette_dark())[c(2,4)]) 
+
+all[[]] %>% 
+  hyper_test_n(var1="seurat_clusters",var2="diagnosis")
+```
+
+```{r source data F6b_d, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 4b
+write.csv(data.frame("UMAP_1"=all@reductions$umap@cell.embeddings[,1],
+                     "UMAP_2"=all@reductions$umap@cell.embeddings[,2],
+                     "Cluster"=all$seurat_clusters,
+                     "Diagnosis"=all$diagnosis,
+                     "Compartment"=all$compartment ,
+                     "Celltype"=all$celltype_cor),
+          file.path("data","source_data","panel_F6b_d.csv"))
+```
+
+### Figure 6e
+```{r Figure F6e, warning=FALSE,message=FALSE}
+## subset for tissue resident myeloid cells
+gb_mf <- subset(all, subset=celltype_cor %in% c("MG","CAMs","TAMs","Trans. moTAMs") & diagnosis == "GB") #,"MG"
+
+comp_celltype <- case_when(grepl("MG",gb_mf$celltype_cor) ~ "MG",
+                          T ~ paste(gb_mf$celltype_cor,gb_mf$compartment,sep="_"))
+
+names(comp_celltype) <- colnames(gb_mf)
+gb_mf$comp_celltype <- comp_celltype
+Idents(gb_mf) <- gb_mf$comp_celltype
+
+## create the mofa object
+if (!file.exists(file.path("data","mofa_model_gb_myeloid_cells.h5"))) {
+  ## create MOFA object
+  #DefaultAssay(gb_mf) <- "RNA"
+  gb_mf <- gb_mf %>% NormalizeData() %>% FindVariableFeatures(nfeatures = 5000) %>% ScaleData() 
+  
+  MOFAobject_all <- create_mofa(gb_mf, groups = "comp_celltype", features = VariableFeatures(gb_mf), assay="RNA", extract_metadata = T)
+  
+  ## plot data overview
+  plot_data_overview(MOFAobject_all)
+  
+  ## Default data options
+  data_opts <- get_default_data_options(MOFAobject_all)
+  
+  ## Default model options
+  model_opts <- get_default_model_options(MOFAobject_all)
+  
+  ## Training options
+  train_opts <- get_default_training_options(MOFAobject_all)
+  train_opts$convergence_mode <- "fast"
+  train_opts$seed <- 42
+  model_opts$num_factors <- 10
+  
+  #prepare mofa object
+  MOFAobject_all <- prepare_mofa(
+    object = MOFAobject_all,
+    data_options = data_opts,
+    model_options = model_opts,
+    training_options = train_opts
+  )
+  
+  ## generate a hdf5 file for the output
+  rhdf5::h5createFile(file.path("data","mofa_model_gb_myeloid_cells.h5"))
+  
+  ## train model
+  MOFAobject_all <- run_mofa(MOFAobject_all, outfile = file.path("data","mofa_model_gb_myeloid_cells.h5"), use_basilisk = T)
+} else {
+  MOFAobject_all <- load_model(file.path("data","mofa_model_gb_myeloid_cells.h5"))
+}
+
+## plot model
+
+plt <- plot_variance_explained(MOFAobject_all, x="view", y="factor") +
+  geom_text(aes(label=round(value,2))) +
+  coord_fixed()
+
+plt
+
+```
+
+```{r source data F6e, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 4b
+write.csv(data.frame(plt$data),
+          file.path("data","source_data","panel_F6e.csv"))
+```
+
+```{r Figure F6f, warning=FALSE,message=FALSE}
+## gsea cluster profiler
+if (!file.exists(file.path("data","mofa_weights2_>.1_gb_mf.csv"))) {
+  ## gsea cluster profiler
+  mofa_weights2 <- get_weights(MOFAobject_all, views = "RNA", factors = 1:8, 
+                               as.data.frame = TRUE) %>% 
+    group_by(factor) %>% 
+    top_n(100, wt=value)
+  #filter(value>.1)
+  
+  ## convert gene names
+  genes <- bitr(unique(mofa_weights2$feature), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = 'org.Hs.eg.db')
+  colnames(genes)[1] <- "feature"
+  
+  ## comparison between clusters
+  mofa_weights2 <- mofa_weights2 %>% 
+    left_join(genes[!duplicated(genes$feature),]) %>% 
+    na.omit()
+  
+  ## export mofa_weight2
+  write.csv(mofa_weights2, file.path("data","mofa_weights2_>.1_gb_mf.csv"))
+} else {
+  mofa_weights2 <- read.csv(file.path("data","mofa_weights2_>.1_gb_mf.csv"), row.names = 1)
+} 
+
+### note that with the current version of clusterProfiler the plot will look slightly different
+diff_go_bp <- compareCluster(ENTREZID ~ factor,
+                             data=mofa_weights2, 
+                             fun = enrichGO,
+                             OrgDb = 'org.Hs.eg.db',
+                             ont = "BP")
+
+plt <- clusterProfiler::dotplot(diff_go_bp)
+
+plt
+```
+
+```{r source data F6f, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 4b
+write.csv(mofa_weights2,
+          file.path("data","source_data","panel_F6f.csv"))
+```
+
+### Preprocess the data for Figure 6g - get the reference data
+```{r Figure 6g preprocess, warning=FALSE,message=FALSE}
+
+if (!file.exists(file.path("data","GBM1_left.RData"))) {## object 8 contains leptomeninges and cortex
+  ## subset it and create spatial segments
+  coord_df <- read.csv(file.path("data","Out_GBM1_Scale50_High_Prior_s50_sd50_conf08","b1hi_ctrl_coord_prior08.csv"))
+  colnames(coord_df) <- c("barcodes","x","y")
+  count_mtr  <- read.csv(file.path("data","Out_GBM1_Scale50_High_Prior_s50_sd50_conf08","segmentation_counts_filt_prior08.csv"),row.names = 1)
+  count_mtr <- count_mtr[, colSums(count_mtr) >= 5]
+  
+  ## subset coord_df for the left half
+  coords_GBM1_left <- coord_df[coord_df$x < 12095,]
+  count_mtr_GBM1_left <- Matrix(as.matrix(count_mtr[,colnames(count_mtr) %in% coords_GBM1_left$barcodes]), sparse = T)       
+  barcodes_GBM1_left <- colnames(count_mtr_GBM1_left)[colnames(count_mtr_GBM1_left) %in% coords_GBM1_left$barcodes]
+  coords_GBM1_left <- coords_GBM1_left[coords_GBM1_left$barcodes %in% barcodes_GBM1_left,]
+  
+  GBM1_left <- initiateSpataObject_CountMtr(
+    coords_df = coords_GBM1_left, # your coordinate data.frame
+    count_mtr = count_mtr_GBM1_left, # a matrix with unprocessed count values
+    sample_name = "CtrlCtx4_GBM1_left",
+    image = file.path("data","Out_GBM1_Scale50_High_Prior_s50_sd50_conf08","")
+  )
+  GBM1_left <- createTrajectories(object = GBM1_left )
+  GBM1_left <- createSegmentation(object = GBM1_left )
+  
+  save(GBM1_left, file = file.path("data","GBM1_left.RData"))
+  
+  ## subset coord_df for the right half
+  coords_GBM1_right <- coord_df[coord_df$x > 12095,]
+  count_mtr_GBM1_right <- Matrix(as.matrix(count_mtr[,colnames(count_mtr) %in% coords_GBM1_right$barcodes]), sparse = T)       
+  barcodes_GBM1_right <- colnames(count_mtr_GBM1_right)[colnames(count_mtr_GBM1_right) %in% coords_GBM1_right$barcodes]
+  coords_GBM1_right <- coords_GBM1_right[coords_GBM1_right$barcodes %in% barcodes_GBM1_right,]
+  
+  GBM1_right <- initiateSpataObject_CountMtr(
+    coords_df = coords_GBM1_right, # your coordinate data.frame
+    count_mtr = count_mtr_GBM1_right, # a matrix with unprocessed count values
+    sample_name = "CtrlCtx4_GBM1_right",
+    image = "/Users/romansankowski/Documents/single_cell_analysis/Cartana_spatial_2022/data/DAPI_50%_scaled/DAPI_Ctrl Ctx 4_ISAP13586301_20220629.png"
+  )
+  #GBM1_right <- createTrajectories(object = GBM1_right )
+  GBM1_right <- createSegmentation(object = GBM1_right )
+  GBM1_right <- createTrajectories(object = GBM1_right )
+  save(GBM1_right, file = file.path("data","GBM1_right.RData"))
+  
+} else {
+  load(file.path("data","GBM1_left.RData"))
+  load(file.path("data","GBM1_right.RData"))
+  
+}
+
+## setup seurat object
+if (!file.exists(file.path("data","seurat_gbm1_left.H5Seurat"))) {
+  GBM1_left_seurat <- GBM1_left %>% 
+    transformSpataToSeurat
+  
+  GBM1_right_seurat <- GBM1_right %>% 
+    transformSpataToSeurat
+  
+  SaveH5Seurat(GBM1_left_seurat, file.path("data","seurat_gbm1_left.H5Seurat"))
+  SaveH5Seurat(GBM1_right_seurat, file.path("data","seurat_gbm1_right.H5Seurat"))
+} else {
+  GBM1_left_seurat <-  LoadH5Seurat(file.path("data","seurat_gbm1_left.H5Seurat"))
+  GBM1_right_seurat <- LoadH5Seurat(file.path("data","seurat_gbm1_right.H5Seurat"))
+}
+
+## assign cell types
+## plot celltypes
+
+## merge both objects
+all <- merge(x=GBM1_left_seurat, GBM1_right_seurat)
+
+VariableFeatures(all) <- rownames(all) 
+all <- all %>% 
+  NormalizeData() %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+## load reference
+reference <- LoadH5Seurat(file.path("data","reference_seurat_gb.H5Seurat"))
+  
+## downsample reference
+set.seed(79106)
+cell_ids <- reference[[]] %>% 
+  rownames_to_column(var = "cellID") %>% 
+  group_by(celltype_cor) %>% 
+  slice_sample(n=200, replace = T) %>% 
+  distinct(cellID, celltype_cor)
+
+## subset for genes present in the nanostring dataset
+reference <- reference[rownames(all),cell_ids$cellID]
+
+## remove cells with few counts
+reference <- reference[,colSums(reference[["RNA"]]@counts)>10]
+
+## Normalize data
+VariableFeatures(reference) <- rownames(reference)
+DefaultAssay(reference) <- "RNA"
+reference <- reference %>% 
+  NormalizeData() %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+## classify mvp cells
+if (!file.exists(file.path("data","GB1_celltype_predictions.RData"))) {
+  ## map celltypes
+  anchors_GB1 <- FindTransferAnchors(reference = reference , query = all,
+                                     dims = 1:30, reference.reduction = "pca")
+  predictions_GB1 <- TransferData(anchorset = anchors_GB1, refdata = reference$celltype_cor,
+                                  dims = 1:30, k.weight = 20)
+  
+  ## adjust cell labels
+  predictions_GB1$predicted.id_cor <- case_when(predictions_GB1$predicted.id == "Transitory Mo-TAM" ~ "Tr. moTAMs",
+                                                     grepl("Mo-TAM", predictions_GB1$predicted.id) ~ "moTAMs",
+                                                     grepl("TAM", predictions_GB1$predicted.id) ~ "mgTAMs",
+                                                     T ~ predictions_GB1$predicted.id)
+  
+  save(predictions_GB1, file = file.path("data","GB1_celltype_predictions.RData"))
+} else {
+  load(file.path("data","GB1_celltype_predictions.RData"))
+}
+
+
+
+```
+
+### Plot figure 6g - top panel
+```{r Figure 6g top panel, warning=FALSE,message=FALSE}
+## add metadata 
+all <- AddMetaData(all,predictions_GB1)
+
+## ## plot
+coord <- rbind(GBM1_left@coordinates[[1]],
+               GBM1_right@coordinates[[1]])
+rownames(coord) <- coord$barcodes
+
+## reorder based on the seurat object
+coord <- coord[colnames(all),]
+
+#rownames(coord) <- gsub("cell","X",coord$barcodes)
+
+coord$segmentation <- gsub("[1-9]$","",all[[]][rownames(coord),]$segmentation)
+coord$segmentation_detail <- all[[]][rownames(coord),]$segmentation
+coord$celltype_cor <- all[[]][rownames(coord),]$predicted.id_cor
+
+## define colors
+cell_cols <- unname(palette_light())
+names(cell_cols) <- c("Astro","CAMs","Endothelial cells","Fibroblast","Lymphocytes","mgTAMs","Mural cells","Neuron","Oligo","Tumor","moTAMs","Tr. moTAMs")
+
+coord %>% 
+  ggplot(aes(x,y,color=celltype_cor)) +
+  geom_point(pch=20, size=.001) +
+  scale_color_manual(values = cell_cols[unique(coord$celltype_cor)]) +
+  theme_void() +
+  coord_fixed() 
+
+```
+
+### Plot Figure 6g - bottom panel
+```{r Figure 6g left panel, warning=FALSE,message=FALSE}
+coord <- coord %>% 
+  mutate(segmentation_detail= ifelse(segmentation_detail=="none", "Solid Tumor", segmentation_detail)) 
+coord %>% 
+  ggplot(aes(x,y,color=segmentation_detail)) +
+  geom_point(pch=20, size=.001) +
+  #scale_color_manual(values = cell_cols[unique(coord$celltype_cor)]) +
+  scale_color_brewer(palette="Set3") +
+  theme_void() +
+  coord_fixed() 
+
+```
+
+
+### Figure 6h - left panel
+```{r Figure 6h left panel, warning=FALSE,message=FALSE}
+coord %>% 
+  filter(segmentation_detail=="hypoxia9") %>% 
+  ggplot(aes(x,y,color=celltype_cor)) +
+  geom_point(pch=20, size=2) +
+  scale_color_manual(values = cell_cols[unique(coord$celltype_cor)]) +
+  theme_void() +
+  coord_fixed() +
+  NoLegend() +
+  geom_segment(aes(x = max(x)-550, y = min(y)+50, xend = max(x)-50, yend = min(y)+50), size=1, color="black") +
+  geom_text(aes(max(x)-310, y = min(y)+130,label="500 px"))
+
+```
+
+```{r source data F6g_i, echo=FALSE, message=FALSE,warning=FALSE}
+write.csv(coord, file.path("data","source_data","panel_F6g_i.csv"))
+```
+
+
+### Figure 6h - middle panel
+```{r Figure 6h middle panel, warning=FALSE,message=FALSE}
+
+## assess genes along the trajectory
+all_genes <- getGenes(GBM1_right)
+atdf_genes <- assessTrajectoryTrends(object = GBM1_right, 
+                                     trajectory_name = "hypoxia_left_short", 
+                                     variables = all_genes)
+
+# output example
+atdf_genes
+
+## ascending genes
+ascending_genes <-
+  filterTrajectoryTrends(atdf = atdf_genes,
+                         limit = 68,
+                         trends = "Gradient ascending", 
+                         variables_only = FALSE) %>% # return a data.frame
+  top_n(-10, wt=auc)
+
+ascending_genes
+
+descending_genes <-
+  filterTrajectoryTrends(atdf = atdf_genes,
+                         limit = 68,
+                         trends = c("Gradient ascending", "Gradient descending"), 
+                         variables_only = FALSE) %>% # return a data.frame
+  top_n(-10, wt=auc)
+
+descending_genes
+descending_genes_vec <- descending_genes$variables
+
+## plot heatmap
+hm_colors <- viridis::inferno(n = 100)
+
+plotTrajectoryHeatmap(object = GBM1_right, 
+                      trajectory_name = "hypoxia_left_short",
+                      variables = descending_genes_vec,
+                      arrange_rows = "maxima",
+                      colors = hm_colors,
+                      show_rownames = TRUE,
+                      split_columns = FALSE, 
+                      smooth_span = 0.5)
+
+```
+
+### Figure 6i
+```{r Figure 6i, warning=FALSE,message=FALSE}
+## plot composition of hypoxia 9
+coord3 <- coord %>% 
+  group_by(segmentation_detail, celltype_cor) %>% 
+  summarise(cell_count=n()) %>% 
+  group_by(segmentation_detail, .drop = F) %>% 
+  mutate(total_cells = sum(cell_count),
+         cell_pct=round(cell_count/total_cells*100,2),
+         label=paste0(celltype_cor," (",cell_pct,"%)"),
+         Cell_ordered=reorder(celltype_cor, cell_pct),
+         seg_total=paste0(segmentation_detail, "\n(n=",total_cells,")")) 
+
+
+coord3 %>% 
+  filter(segmentation_detail %in% c("none", "hypoxia9")) %>% 
+  ggplot(aes(x=seg_total, y=cell_pct, fill=Cell_ordered, label = label)) +
+  geom_col(position = "stack", width = .5,alpha=.8, color="black",lwd =.1) +
+  scale_y_continuous(breaks = c(0,50,100)) +
+  #scale_fill_tq(guide_none()) +
+  scale_fill_manual(values = cell_cols[unique(coord$celltype_cor)]) +
+  geom_text_repel(position = position_stack_and_nudge(vjust=.5,y=3), max.overlaps = 30) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        text = element_text(size=15)) +
+  coord_flip() +
+  labs(y="Cell percentage [%]",x=element_blank())
+
+```
+### preprocess data for Figure 6j
+```{r Figure 6j preprocess, warning=FALSE,message=FALSE}
+load(file.path("data","gb_necrosis.RData"))
+
+DefaultAssay(gb_necrosis) <- "Nanostring"
+VariableFeatures(gb_necrosis) <- rownames(gb_necrosis)
+
+gb_necrosis <- gb_necrosis %>% 
+  NormalizeData() %>% 
+  ScaleData() %>% 
+  RunPCA()
+
+
+## classify necrosis cells
+if (!file.exists(file.path("data","GBM_1_18_celltype_predictions.RData"))) {
+   ## load annotated references single-nuc-seq dataset
+  reference <- LoadH5Seurat(file.path("data","reference_seurat.H5Seurat"))
+
+  ## downsample reference
+  set.seed(79106)
+  cell_ids <- reference[[]] %>% 
+    rownames_to_column(var = "cellID") %>% 
+    group_by(celltype_cor) %>% 
+    slice_sample(n=200, replace = T) %>% 
+    distinct(cellID, celltype_cor)
+  
+  ## subset for genes present in the nanostring dataset
+  reference <- reference[rownames(gb_mvp),cell_ids$cellID]
+  
+  ## remove cells with few counts
+  reference <- reference[,colSums(reference[["RNA"]]@counts)>10]
+  
+  ## re-normalize
+  VariableFeatures(reference) <- rownames(reference)
+  DefaultAssay(reference) <- "RNA"
+  reference <- reference %>% 
+    NormalizeData() %>% 
+    ScaleData() %>% 
+    RunPCA()
+
+  ## map celltypes
+  anchors_necrosis <- FindTransferAnchors(reference = reference , query = gb_necrosis,
+                                          dims = 1:30, reference.reduction = "pca")
+  predictions_necrosis <- TransferData(anchorset = anchors_necrosis, refdata = reference$celltype_cor,
+                                       dims = 1:30, k.weight = 20)
+  
+  ## adjust cell labels
+  predictions_necrosis$predicted.id_cor <- case_when(predictions_necrosis$predicted.id == "Transitory Mo-TAM" ~ "Tr. moTAMs",
+                                                     grepl("Mo-TAM", predictions_necrosis$predicted.id) ~ "moTAMs",
+                                                     grepl("TAM", predictions_necrosis$predicted.id) ~ "mgTAMs",
+                                                     T ~ predictions_necrosis$predicted.id)
+  
+  save(predictions_necrosis, file = file.path("data","GBM_1_18_celltype_predictions.RData"))
+} else {
+  load(file.path("data","GBM_1_18_celltype_predictions.RData"))
+}
+
+## add metadata 
+gb_necrosis <- AddMetaData(gb_necrosis,predictions_necrosis)
+
+
+
+```
+
+### Figure 6j left panel
+```{r Figure 6j right, warning=FALSE,message=FALSE}
+## plot
+cell_cols <- unname(palette_light())
+names(cell_cols) <- c("Astro","CAMs","Endothelial cells","Fibroblast","Lymphocytes","mgTAMs","Mural cells","Neuron","Oligo","Tumor","moTAMs","Tr. moTAMs")
+ImageDimPlot(gb_necrosis, boundaries = "segmentation",group.by = "predicted.id_cor", coord.fixed = T, size = 10) +
+  scale_fill_manual(values = cell_cols[unique(gb_necrosis$predicted.id_cor)])
+
+## celltype bar plot
+gb_necrosis_meta <- gb_necrosis[[]] %>% 
+  group_by(predicted.id_cor) %>% 
+  summarise(cell_count=n()) %>% 
+  mutate(total_cells = sum(cell_count),
+         cell_pct=round(cell_count/total_cells*100,2),
+         label=paste0(predicted.id_cor," (",cell_pct,"%)"),
+         Cell_ordered=reorder(predicted.id_cor, cell_pct),
+         seg_total=paste0("\n(n=",total_cells,")")) 
+
+```
+
+### Figure 6j right panel
+```{r Figure 6j left, warning=FALSE,message=FALSE}
+## plot segments
+gb_necrosis <- gb_necrosis %>% 
+  AddMetaData(read.csv(file.path("data","gb_necrosis_metadata_segmentation.csv"), row.names="barcodes"))
+
+## manually adjust segmentation to follow the gene expression patterns
+segmentation <- case_when(gb_necrosis$segmentation == "none" & GetTissueCoordinates(gb_necrosis)$y < -44000 & GetTissueCoordinates(gb_necrosis)$x > -322000 ~ "tumor",
+                          gb_necrosis$segmentation == "none" & GetTissueCoordinates(gb_necrosis)$y < -47000 ~ "tumor",
+                          gb_necrosis$segmentation == "none" & GetTissueCoordinates(gb_necrosis)$y > -44000 & GetTissueCoordinates(gb_necrosis)$x < -322000 ~ "necrosis",
+                          gb_necrosis$segmentation == "none"  ~ "tumor",
+                          T ~ gb_necrosis$segmentation )
+names(segmentation) <- colnames(gb_necrosis)
+
+gb_necrosis$segmentation_cor <- segmentation
+
+## celltype bar plot per segments
+gb_necrosis_meta <- gb_necrosis[[]] %>% 
+  mutate(segmentation_cor=factor(segmentation_cor,levels=c("tumor","necrosis"))) %>% 
+  group_by(segmentation_cor,predicted.id_cor) %>% 
+  summarise(cell_count=n()) %>% 
+  group_by(segmentation_cor) %>% 
+  mutate(total_cells = sum(cell_count),
+         cell_pct=round(cell_count/total_cells*100,2),
+         label=paste0("(",cell_pct,"%)"),
+         seg_total=paste0("\n(n=",total_cells,")"),
+         segmentation_cor2=paste0(segmentation_cor,"\n(n=",total_cells,")")) 
+
+
+gb_necrosis_meta %>% 
+  ggplot(aes(x=segmentation_cor, y=cell_pct, fill=reorder(predicted.id_cor, cell_pct), label = label)) +
+  geom_col(position = "stack", width = .5,alpha=.8, color="black",lwd =.1) +
+  scale_y_continuous(breaks = c(0,50,100)) +
+  #scale_fill_tq(guide_none()) +
+  scale_fill_manual(values = cell_cols[unique(gb_necrosis_meta$predicted.id_cor)]) +
+  geom_text_repel(position = position_stack_and_nudge(vjust=.5,y=3), max.overlaps = 30) +
+  theme_minimal() +
+  theme(panel.grid.major.y = element_blank(),
+        panel.grid.minor = element_blank(),
+        text = element_text(size=15)) +
+  #coord_flip() +
+  labs(y="Cell percentage [%]",x=element_blank())
+```
+
+```{r source data F6j, echo=FALSE,warning=FALSE,message=FALSE}
+coords_gb <- GetTissueCoordinates(gb_necrosis) 
+coords_gb$celltype <- gb_necrosis$predicted.id_cor
+coords_gb$segmentation <- gb_necrosis$segmentation_cor
+
+write.csv(coords_gb, file.path("data","source_data","panel_F6j.csv"))
+```
+
+### Figure 6k
+```{r Figure 6k, warning=FALSE,message=FALSE}
+load(file.path("data","multimodal_harmony_integrated_gb.RData"))
+
+all <- refquery_hm #LoadH5Seurat(file.path("data","multimodal_harmony_integrated_gb.H5Seurat"))
+rm(refquery_hm)
+
+
+## cell cycle scoring
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Create our Seurat object and complete the initalization steps
+all <- CellCycleScoring(all, s.features = s.genes, g2m.features = g2m.genes)
+cc_scores <- ScoreSignatures_UCell(all[["RNA"]]@counts, features=list(s.features = s.genes, g2m.features = g2m.genes))
+all <- AddMetaData(all, as.data.frame(cc_scores))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+levels(all) <- rev(order_clusters)[c(12,14,13,15:30,11:1)]
+
+## adjust cell types
+celltype_cor <- case_when(
+  all$seurat_clusters %in% c("19","29") ~ "Neuroectodermal",
+  all$seurat_clusters %in% c("17") ~ "CAMs",
+  all$seurat_clusters %in% c("3","7","11","14","16","0","12","1","5") ~ "MG",
+  all$seurat_clusters %in% c("15") & all$diagnosis == "GB" ~ "Trans. moTAMs",
+  all$seurat_clusters %in% c("2","4") & all$diagnosis == "GB" ~ "TAMs",
+  #all$seurat_clusters %in% c("2") & all$diagnosis == "GB" ~ "mgTAMs",
+  all$seurat_clusters %in% c("8") ~ "Class. Mono",
+  all$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all$predicted.celltype == "CD16 Mono" & all$seurat_clusters == ("23") ~ "Non-Class. Mono",
+  T ~ all$predicted.celltype
+)
+
+names(celltype_cor) <- colnames(all)
+all$celltype_cor <- celltype_cor
+
+## run adt analysis
+all_adt <- all
+DefaultAssay(all_adt) <- "ADT"
+
+VariableFeatures(all_adt) <- rownames(all_adt)
+all_adt <- all_adt %>% 
+  subset(subset = nCount_ADT > 50) %>%  #  %>% 
+  NormalizeData(normalization.method = 'CLR', margin = 2) %>% 
+  ScaleData(vars.to.regress = "nCount_ADT") %>% 
+  RunPCA(reduction.name = 'apca')
+
+## set composite celltypes
+composite_celltype <- paste(all_adt$compartment, all_adt$diagnosis, all_adt$celltype_cor,sep="_")
+
+composite_celltype[grepl("(MG|mg)",composite_celltype)] <- gsub("(LM_|CTX_)","",composite_celltype[grepl("(MG|mg)",composite_celltype)])
+
+names(composite_celltype) <- colnames(all_adt)
+all_adt$composite_celltype <- composite_celltype
+
+all_adt_myeloid <- all_adt[,grepl("(MG|TAM|CAMs)", all_adt$composite_celltype)]
+
+Idents(all_adt_myeloid) <- all_adt_myeloid$composite_celltype
+
+## both compartments
+## differential genes per compartment
+myeloid_adt_markers <- FindAllMarkers(all_adt_myeloid,logfc.threshold=.2) 
+top5 <- myeloid_adt_markers %>% 
+  filter(p_val_adj<.05 & avg_log2FC>0) %>% 
+  group_by(cluster) %>% 
+  top_n(5, wt=avg_log2FC) 
+
+mean_expr <- data.frame(t(as.matrix(all_adt_myeloid[["ADT"]]@data[unique(top5$gene),])), "cluster"=all_adt_myeloid$composite_celltype) %>%  
+  filter(cluster != "CTX_Ctrl_CAMs") %>% ### exclude ctrl cams because they were so few
+  group_by(cluster) %>% 
+  summarise_all(.funs = mean) %>% 
+  as.data.frame()
+
+rownames(mean_expr) <- mean_expr$cluster
+mean_expr$cluster <- NULL
+prots <- gsub("(Hu\\.|\\.M5E2|HuMs\\.|_RPA_T4)","",colnames(mean_expr))
+prots <- gsub("(\\.)","_",prots)
+colnames(mean_expr) <- prots
+mat <- scale(as.matrix(mean_expr))
+
+## add row annotation 
+row_anns <- mat %>%
+  as.data.frame() %>% 
+  rownames_to_column(var = "sample") %>% 
+  mutate(compartment = ifelse(grepl("MG",sample),"CTX",gsub("_.*","",sample)),
+         diagnosis = ifelse(grepl("GB",sample), "GB","Ctrl")) %>% 
+  column_to_rownames("sample")
+
+row_ha <- rowAnnotation(compartment = row_anns$compartment,
+                        diagnosis = row_anns$diagnosis,
+                        col = list(compartment = c("LM" = unname(palette_dark())[4], 
+                                                 "CTX" = unname(palette_dark())[2]),
+                                    diagnosis =  c("Ctrl" = unname(palette_green())[c(5)],
+                                                   "GB" = unname(palette_green())[c(7)])),
+                        gap = unit(2.5, "mm"),
+                        border = TRUE)
+
+Heatmap(mat, cluster_rows = T,
+        cluster_columns = T, 
+        #right_annotation = row_ha,
+        clustering_method_rows = "ward.D2",
+        width = ncol(mat)*unit(5, "mm"), 
+        height = nrow(mat)*unit(5, "mm"))
+```
+
+```{r source data F6k, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(mat, file.path("data","source_data","panel_F6k.csv"))
+```
+
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de

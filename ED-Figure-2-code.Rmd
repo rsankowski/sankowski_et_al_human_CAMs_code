@@ -1,0 +1,121 @@
+---
+title: "Figure-2-code"
+output: html_notebook
+---
+
+### Load packages
+```{r Load packages, warning=FALSE, message=FALSE}
+library(EnhancedVolcano)
+library(UCell)
+library(ggpubr)
+library(rstatix)
+library(Seurat)
+library(SeuratDisk)
+library(assertthat)
+library(tidyquant)
+library(tidyverse)
+library(viridis)
+library(ComplexHeatmap)
+library(Matrix)
+```
+
+### Load seurat object and adjust metadata
+```{r Adjust metadata, warning=FALSE, message=FALSE}
+load(file.path("data","multimodal_harmony_integrated_controls.RData"))
+all <- refquery_merged
+rm(refquery_merged)
+source(file.path("R","functions.R"))
+
+## export numbers
+write.csv(table(all$sample, all$compartment), file.path("data","sample_compartment_overview_10x_ctrl.csv"))
+
+## cell cycle scoring
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+
+# Create our Seurat object and complete the initalization steps
+all <- CellCycleScoring(all, s.features = s.genes, g2m.features = g2m.genes)
+cc_scores <- ScoreSignatures_UCell(all[["RNA"]]@counts, features=list(s.features = s.genes, g2m.features = g2m.genes))
+all <- AddMetaData(all, as.data.frame(cc_scores))
+
+## adjust cluster order
+order_clusters <- data.frame(seurat_clusters= all$seurat_clusters, row.names = rownames(all[[]])) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(all) <- rev(order_clusters)[c(11:15,10:1,31:33,16:30,34:35)] 
+all$seurat_clusters <- factor(all$seurat_clusters, levels = levels(all))
+
+## adjust cell types
+celltype_cor <- case_when(
+  all$seurat_clusters == "24" ~ "Neuroectodermal cells",
+  all$seurat_clusters == "18" & all$predicted.celltype =="Platelet" ~ "cDC2",
+  all$seurat_clusters %in% c("19","26") ~ "CAMs",
+  all$seurat_clusters %in% c("22") & all$compartment == "CP" ~ "Kolmer cells",
+  all$seurat_clusters %in% c("0","1","4","6","13","16","22","30") ~ "MG",
+  all$seurat_clusters %in% c("9") ~ "Class. Mono",
+  all$seurat_clusters %in% c("27") & all$predicted.celltype %in% c("HSPC") ~ "NK Proliferating",
+  all$seurat_clusters %in% c("28") & all$predicted.celltype %in% c("HSPC") ~ "pDC",
+  all$seurat_clusters %in% c("15","20","7","2") ~ "Class. Mono",
+  all$seurat_clusters %in% c("31","23") ~ "Non-Class. Mono",
+  all$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all$predicted.celltype == "CD16 Mono" ~ "Non-Class. Mono",
+  T ~ all$predicted.celltype
+)
+names(celltype_cor) <- colnames(all)
+all$celltype_cor <- celltype_cor
+```
+
+### Extended Data Figure 2 a
+```{r ED F2a left, warning=FALSE, message=FALSE}
+## plot celltypes
+DimPlot(all, group.by = "celltype_cor", label = T, pt.size = 1, repel = T) +
+  scale_color_manual(values = c(colors_fig,colors_pat)[-28]) +
+  theme_void() +
+  NoLegend() +
+  labs(title = element_blank())
+```
+
+```{r ED F2b right, warning=FALSE, message=FALSE}
+## plot all celltype dendrogram
+df <- all[[]]
+df <- df[df$celltype_cor %in% names(table(df$celltype_cor))[table(df$celltype_cor)>50] & !df$celltype_cor %in% c("Platelets","Neuroectodermal cells"),]
+order_cells <- data.frame(seurat_clusters= df$celltype_cor, row.names = rownames(df)) %>%
+  bind_cols(as.data.frame(t(all[["RNA"]]@scale.data[,rownames(df)]))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_cells) <- order_cells$seurat_clusters
+hc <- hclust(dist(order_cells[,-1]), method = "ward.D2")
+plot(hc)
+
+```
+
+### Extended Data Figure 2b-d
+```{r ED F2b-d, warning=FALSE, message=FALSE}
+
+ signatures <- c("macrophages_UCell","microglia_UCell","monocytes_UCell","cDC2_UCell","cDC1_UCell","pDC_UCell","bcells_UCell","tcell_UCell","nk_UCell","S.Score","G2M.Score","DAM_UCell")
+
+walk(signatures, function(x) {
+  plt <- FeaturePlot(all, x) +
+    scale_color_distiller(palette = "Reds", direction = 1) +
+    theme_void()
+  print(plt)
+})
+```
+
+```{r source data EDF2, echo=FALSE,warning=FALSE,message=FALSE}
+data.frame(UMAP_1=all@reductions$umap@cell.embeddings[,"UMAP_1"] ,
+            UMAP_2=all@reductions$umap@cell.embeddings[,"UMAP_2"] ,
+            "Celltype"=all$celltype_cor,
+           all[[]][,signatures]) %>% 
+  write.csv(file.path("data","source_data","panel_ED_F2.csv"))
+```
+

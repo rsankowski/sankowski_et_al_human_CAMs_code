@@ -1,0 +1,244 @@
+---
+title: "Figure-2-code"
+output: html_notebook
+---
+
+### Load packages
+```{r load packages, warning=FALSE, message=FALSE}
+library(Seurat)
+library(SeuratDisk)
+library(tidyverse)
+library(assertthat)
+library(tidyquant)
+library(clusterProfiler)
+library(viridis)
+```
+
+### Load seurat object and adjust metadata
+```{r Adjust metadata, warning=FALSE, message=FALSE}
+## load functions
+source(file.path("R","functions.R"))
+
+ctrl <- LoadH5Seurat(file.path("data","reference_mapped_celseq2_ctrl_cd206_gate_no_lowq_cells.H5Seurat"))
+ctrl <- PrepSCTFindMarkers(ctrl)
+
+## reorder clusters
+order_clusters <- data.frame(seurat_clusters= ctrl$seurat_clusters, row.names = rownames(ctrl[[]])) %>%
+  bind_cols(as.data.frame(t(ctrl[["SCT"]]@scale.data))) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(.funs=mean) %>%
+  as.data.frame()
+
+rownames(order_clusters) <- order_clusters$seurat_clusters
+order_clusters <- order_clusters$seurat_clusters[hclust(dist(order_clusters[,-1]))$order]
+
+#reorder the clusters
+levels(ctrl) <- rev(order_clusters)
+ctrl$seurat_clusters <- factor(ctrl$seurat_clusters, levels = levels(ctrl))
+
+## adjust cell type assignment
+## reorder clusters
+ctrl$compartment_ind <- factor(ctrl$compartment_ind, levels = c("CP","PVM","DM","LM"))
+levels(ctrl$compartment_ind) <- c("CP","PC","DM","LM")
+
+```
+
+### Figure 2b
+```{r Figure 2b, warning=FALSE, message=FALSE}
+DimPlot(ctrl, label = T, pt.size = 5) +
+  scale_color_tq() +
+  theme_void()
+```
+```{r source data F2b, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1b
+data.frame(UMAP_1=ctrl@reductions$umap@cell.embeddings[,"UMAP_1"] ,
+            UMAP_2=ctrl@reductions$umap@cell.embeddings[,"UMAP_2"] ,
+            cluster=ctrl$seurat_clusters) %>% 
+  left_join(data.frame(cluster=levels(ctrl),
+                       colors=rev(unname(palette_light()))[12:9])) %>% 
+  #ggplot(aes(UMAP_1,UMAP_2, color=colors)) + geom_point()+ scale_color_identity()
+  write.csv(file.path("data","source_data","panel_F2b.csv"))
+```
+
+### Figure 2c - top panel
+```{r Figure 2c top panel, warning=FALSE, message=FALSE}
+DimPlot(ctrl, label = T, pt.size = 5, group.by = "compartment_ind") +
+  scale_color_tq(theme = "dark") +
+  labs(title = element_blank()) +
+  theme_void()
+```
+```{r source data F2c_top, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1b
+data.frame(UMAP_1=ctrl@reductions$umap@cell.embeddings[,"UMAP_1"] ,
+            UMAP_2=ctrl@reductions$umap@cell.embeddings[,"UMAP_2"] ,
+            compartment=ctrl$compartment_ind) %>% 
+  left_join(data.frame(compartment=levels(ctrl$compartment_ind),
+                       colors=rev(unname(palette_dark()))[12:9])) %>% 
+  #ggplot(aes(UMAP_1,UMAP_2, color=colors)) + geom_point()+ scale_color_identity()
+  write.csv(file.path("data","source_data","panel_F2c_top_panel.csv"))
+```
+
+### Figure 2c - bottom panel
+```{r Figure 2c bottom panel, warning=FALSE, message=FALSE}
+## mosaic plot
+ctrl[[]] %>% 
+  mosaicGG2(X="seurat_clusters",FILL="compartment_ind", colors = unname(palette_dark()))
+```
+```{r source data F2c_bottom, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1b
+data.frame(cluster=factor(ctrl$seurat_clusters, levels = levels(ctrl)),
+            compartment=ctrl$compartment_ind) %>% 
+  left_join(data.frame(compartment=levels(ctrl$compartment_ind),
+                       colors=rev(unname(palette_dark()))[12:9])) %>% 
+  group_by(cluster,compartment) %>% 
+  summarise(count=n()) %>% 
+  write.csv(file.path("data","source_data","panel_F2c_bottom_panel.csv"))
+```
+
+### Statistical testing in the bottom panel of Figure 2c
+```{r Statistical testig of Figure panel 2c bottom, warning=FALSE,message=FALSE}
+ctrl[[]] %>% 
+  hyper_test_n(var1="seurat_clusters",var2="compartment_ind")
+```
+### Figure 2d
+```{r Figure 2d, warning=FALSE, message=FALSE}
+## find cluster marker genes
+if (!file.exists(file.path("data","cluster_markers_ctrl_no_lowq_celseq.RData"))) {
+  ctrl_markers <- FindAllMarkers(ctrl)
+  save(ctrl_markers, file = file.path("data","cluster_markers_ctrl_no_lowq_celseq.RData"))
+  write.csv2(ctrl_markers, file = file.path("data","cluster_markers_ctrl_no_lowq_celseq.csv"))
+} else {
+  load(file.path("data","cluster_markers_ctrl_no_lowq_celseq.RData"))
+}
+
+## go term analysis
+## convert gene names
+genes <- bitr(unique(ctrl_markers$gene), fromType = "SYMBOL", toType = "ENTREZID", OrgDb = 'org.Hs.eg.db')
+colnames(genes)[1] <- "gene"
+
+## comparison between clusters
+ctrl_markers <- ctrl_markers %>% 
+  left_join(genes[!duplicated(genes$gene),]) %>% 
+  na.omit() %>% 
+  group_by(cluster) %>% 
+  filter(avg_log2FC>0)
+
+diff_go_mf <- compareCluster(ENTREZID ~ cluster,
+                             data=ctrl_markers, 
+                             fun = enrichGO,
+                             OrgDb = 'org.Hs.eg.db',
+                             ont = "MF")
+
+clusterProfiler::dotplot(diff_go_mf)
+```
+
+```{r source data F2d, echo=FALSE,warning=FALSE,message=FALSE}
+### export source data figure 1b
+ctrl_markers <- diff_go_mf@compareClusterResult %>% 
+  write.csv(file.path("data","source_data","panel_F2d.csv"))
+```
+
+### Figure panel 2e
+```{r Figure 2e, warning=FALSE, message=FALSE}
+##load data
+load(file.path("data","multimodal_harmony_integrated_controls.RData"))
+all <- refquery_merged
+rm(refquery_merged)
+
+## run adt analysis
+all_adt <- all
+DefaultAssay(all_adt) <- "ADT"
+
+VariableFeatures(all_adt) <- rownames(all_adt)
+all_adt <- all_adt %>% 
+  subset(subset = nCount_ADT > 50 & experiment %in% c("Exp1","Exp2","Exp4")) %>%  #  %>% 
+  NormalizeData(normalization.method = 'CLR', margin = 2) %>% 
+  ScaleData(vars.to.regress = "nCount_ADT") %>% 
+  RunPCA(reduction.name = 'apca')
+
+## find protein markers
+if (!file.exists(file.path("data","ctrl_adt_markers.RData"))) {
+  adt_markers <- FindAllMarkers(all_adt)
+  
+  ## save file
+  write.csv2(adt_markers, file.path("data", "ctrl_adt_markers.csv"))
+  save(adt_markers, file = file.path("data","ctrl_adt_markers.RData"))
+} else {
+  load(file.path("data","ctrl_adt_markers.RData"))
+}
+
+## plot heatmap
+## plot top 20 markers
+top20 <- adt_markers%>% filter(p_val_adj< .05 & avg_log2FC>0) %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC) %>% 
+  rownames_to_column(var = "rank")
+
+heat <- DoHeatmap(all_adt,features = unique(top20$gene), group.colors = c(colors_many, colors,unname(palette_green()))[-c(14,21,28)])
+heat + scale_fill_viridis(option = "E")
+
+```
+
+```{r source data F2e, echo=FALSE,warning=FALSE,message=FALSE}
+mat <- all_adt[["ADT"]]@scale.data[top20$gene[top20$gene %in% rownames(all_adt[["ADT"]]@scale.data)],] 
+colnames(mat) <- all_adt$seurat_clusters
+mat2 <- Matrix(mat, sparse = T)
+save(mat2, file = file.path("data","source_data","panel_F2e.RData"))
+write.csv(mat, file.path("data","source_data","Fig2e.csv"))
+```
+
+### Figure 2f
+```{r Figure 2f, warning=FALSE, message=FALSE}
+## adjust celltypes
+celltype_cor2 <- case_when(
+  all_adt$seurat_clusters == "24" ~ "Neuroectodermal cells",
+  all_adt$seurat_clusters == "18" & all_adt$predicted.celltype =="Platelet" ~ "cDC2",
+  all_adt$seurat_clusters %in% c("19","26") ~ "CAMs",
+  all_adt$seurat_clusters %in% c("22") & all_adt$compartment == "CP" ~ "Kolmer cells",
+  all_adt$seurat_clusters %in% c("0","1","4","6","13","16","22","30") ~ "MG",
+  all_adt$seurat_clusters %in% c("9") ~ "Class. Mono",
+  all_adt$seurat_clusters %in% c("27") & all_adt$predicted.celltype %in% c("HSPC") ~ "NK Proliferating",
+  all_adt$seurat_clusters %in% c("28") & all_adt$predicted.celltype %in% c("HSPC") ~ "pDC",
+  all_adt$seurat_clusters %in% c("20") & all_adt$compartment == "DM" ~ "Dura_Macs",
+  all_adt$seurat_clusters %in% c("15","20","7","2") ~ "Class. Mono",
+  all_adt$seurat_clusters %in% c("31","23") ~ "Non-Class. Mono",
+  all_adt$predicted.celltype == "CD14 Mono" ~ "Class. Mono",
+  all_adt$predicted.celltype == "CD16 Mono" ~ "Non-Class. Mono",
+  T ~ all_adt$predicted.celltype
+)
+names(celltype_cor2) <- colnames(all_adt)
+all_adt$celltype_cor2 <- celltype_cor2
+
+myeloid_adt <- subset(all_adt, subset=celltype_cor2 %in% c("CAMs","MG","Kolmer cells","Dura_Macs"))
+myeloid_adt$celltype_cor2 <- factor(celltype_cor2, levels = c("CAMs","MG","Kolmer cells","Dura_Macs"))
+Idents(myeloid_adt) <- myeloid_adt$celltype_cor2
+
+myeloid_adt_markers <- FindAllMarkers(myeloid_adt,logfc.threshold=.15)
+top10 <- myeloid_adt_markers %>% 
+  filter(p_val_adj<.05 & avg_log2FC>0) %>% 
+  group_by(cluster) %>% 
+  top_n(10, wt=avg_log2FC) 
+
+mean_expr <- data.frame(t(as.matrix(myeloid_adt[["ADT"]]@data[unique(top10$gene),])), "cluster"=myeloid_adt$celltype_cor2) %>%  
+  group_by(cluster) %>% 
+  summarise_all(.funs = mean) %>% 
+  as.data.frame()
+
+rownames(mean_expr) <- factor(mean_expr$cluster, levels =c("CAMs","MG","Kolmer cells","Dura_Macs"))
+mean_expr$cluster <- NULL
+prots <- gsub("(Hu\\.|\\.M5E2|HuMs\\.)","",colnames(mean_expr))
+prots <- gsub("(\\.)","_",prots)
+colnames(mean_expr) <- prots
+mat <- scale(as.matrix(mean_expr))
+Heatmap(mat[,c(2,10,24:31,1,3:9,11:23)], cluster_rows = T,
+        cluster_columns = F, 
+        clustering_method_rows = "average",
+        width = ncol(mat)*unit(5, "mm"), 
+        height = nrow(mat)*unit(5, "mm"))
+
+```
+```{r source data F2f, echo=FALSE,warning=FALSE,message=FALSE}
+write.csv(mat[,c(2,10,24:31,1,3:9,11:23)], file.path("data","source_data","Fig2f.csv"))
+```
+
+Roman Sankowski
+03-10-2023
+email: roman.sankowski@uniklinik-freiburg.de
